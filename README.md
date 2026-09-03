@@ -325,12 +325,33 @@ ddrt_write_report_json(e, "report.json");
 ddrt_destroy(e);
 ```
 
-`ddrt_prune_results_before(e, max_txn_id)` bounds memory for a long-running
-caller -- see "Feeding it from a long-running DMA model" above.
+### API reference
 
-`ddrt_load_log_file(e, core_id, path)` parses+pushes a CSV log file in one
-call (what the CLI uses internally) if you'd rather not drive it
-transaction-by-transaction.
+Every function takes/returns plain C types (no hidden allocation the caller
+owns except the engine itself). Convention: functions returning `int` give
+`0` on success, `-1` on failure — check `ddrt_last_error(engine)` for why.
+Passing a `NULL` engine to any function is handled gracefully (returns `-1` /
+`0` / empty rather than crashing), which is what makes `ddrt_last_error(NULL)`
+meaningful specifically for a failed `ddrt_create()`. None of this is
+thread-safe: don't call into the same `ddrt_engine_t*` from more than one
+thread without your own locking (e.g. a daemon pushing on one thread and
+calling `ddrt_run()` on another needs a mutex around both).
+
+| function | returns | does |
+|---|---|---|
+| `ddrt_create(config_json_path)` | `ddrt_engine_t*`, `NULL` on failure | load a DDRC config, create an engine |
+| `ddrt_destroy(engine)` | — | free the engine |
+| `ddrt_push_txn(engine, &txn, &out_txn_id)` | `int` | queue one AXI transaction; `out_txn_id` gets the engine-assigned ID |
+| `ddrt_push_barrier(engine, core_id)` | `int` | mark a known sync point for this core — see "Barriers" above |
+| `ddrt_load_log_file(engine, core_id, path)` | `int` | parse a CSV log (`AR`/`AW`/`BARRIER` rows) and push all of it in one call |
+| `ddrt_run(engine)` | `int` | advance the simulation with everything pushed since the last call — safe to call repeatedly; a correct no-op if nothing's new |
+| `ddrt_get_summary(engine, &out)` | `int` | cumulative aggregate stats into `out` — see "Report format" above |
+| `ddrt_get_num_results(engine)` | `uint64_t` | count of currently-retained per-transaction results |
+| `ddrt_get_result_at(engine, index, &out)` | `int` | one per-transaction result by index into `out` — see "Report format" above |
+| `ddrt_prune_results_before(engine, max_txn_id)` | `int` | free retained results with `txn_id <= max_txn_id` — see "Feeding it from a long-running DMA model" above |
+| `ddrt_write_report_json(engine, out_path)` | `int` | write the full summary + per-transaction report to a JSON file |
+| `ddrt_last_error(engine)` | `const char*` | why the last call on this engine failed; pass `NULL` to read a failed `ddrt_create()`'s error instead |
+| `ddrt_version(void)` | `const char*` | library version string |
 
 ## Explicitly out of scope (v1)
 
