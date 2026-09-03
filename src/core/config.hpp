@@ -29,6 +29,14 @@ struct DdrcConfig {
     int rows = 1 << 16;
     int columns = 1 << 10;
     int data_bus_bytes = 8;     // per-channel data bus width, bytes transferred per beat/cycle
+    // DRAM only ever transfers whole bursts of this many beats -- never
+    // fewer -- so it directly sets the over-fetch/burst-efficiency
+    // calculation. Default 8 matches DDR4 BL8; set to 4 for burst-chop (BC4),
+    // or whatever matches the DRAM generation you're modeling (this does not
+    // attempt to model DDR5's different prefetch architecture specifically --
+    // pick the beat count that reproduces its actual minimum access
+    // granularity for your part).
+    int burst_beats = 8;
     double clock_mhz = 1600.0;
 
     // address mapping (gather-list bit fields, contiguous or scattered; see AddressField)

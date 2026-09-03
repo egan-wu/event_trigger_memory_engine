@@ -52,7 +52,8 @@ struct TxnResult {
     double latency_ns = 0.0;
     RowStatus dominant_row_status = RowStatus::Empty;
     uint32_t hits = 0, conflicts = 0, empties = 0;
-    uint32_t bytes = 0;
+    uint32_t bytes = 0;      // logical: what the AXI burst actually requested
+    uint32_t dram_bytes = 0; // physical: full burst-aligned bytes DRAM actually moved (>= bytes)
 };
 
 } // namespace ddrtiming

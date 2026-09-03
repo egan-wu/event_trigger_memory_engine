@@ -176,3 +176,55 @@ DDRTEST(barrier_forces_next_txn_to_wait_for_prior_completion) {
     uint64_t max_pre_barrier_complete = std::max(r[0].complete_cycle, r[1].complete_cycle);
     DDR_CHECK(r[2].issue_cycle >= max_pre_barrier_complete);
 }
+
+DDRTEST(overfetch_metrics_for_undersized_and_misaligned_reads) {
+    // chunk_bytes = data_bus_bytes(8) * burst_beats(8, default) = 64.
+    DdrcConfig cfg = make_test_config();
+    Engine engine(cfg);
+
+    AxiTxn undersized; // chunk-aligned address, but only asks for half a burst window
+    undersized.core_id = 0;
+    undersized.type = TxnType::Read;
+    undersized.axi_id = 1;
+    undersized.addr = 0x2000; // 0x2000 % 64 == 0
+    undersized.size_bytes = 32;
+    undersized.len_beats = 1;
+    engine.push_txn(undersized);
+
+    AxiTxn misaligned; // a full 64B request, but starting mid-window -> straddles two windows
+    misaligned.core_id = 0;
+    misaligned.type = TxnType::Read;
+    misaligned.axi_id = 2;
+    misaligned.addr = 0x2020; // 0x2000 + 32, not chunk-aligned
+    misaligned.size_bytes = 64;
+    misaligned.len_beats = 1;
+    engine.push_txn(misaligned);
+
+    AxiTxn aligned_full; // chunk-aligned and exactly one window -> no waste
+    aligned_full.core_id = 0;
+    aligned_full.type = TxnType::Read;
+    aligned_full.axi_id = 3;
+    aligned_full.addr = 0x3000;
+    aligned_full.size_bytes = 64;
+    aligned_full.len_beats = 1;
+    engine.push_txn(aligned_full);
+
+    engine.run();
+    const auto& r = engine.results();
+    DDR_CHECK_EQ(r.size(), static_cast<size_t>(3));
+
+    DDR_CHECK_EQ(r[0].bytes, 32u);
+    DDR_CHECK_EQ(r[0].dram_bytes, 64u); // one full burst window, half wasted
+
+    DDR_CHECK_EQ(r[1].bytes, 64u);
+    DDR_CHECK_EQ(r[1].dram_bytes, 128u); // straddles two windows -> two full bursts
+
+    DDR_CHECK_EQ(r[2].bytes, 64u);
+    DDR_CHECK_EQ(r[2].dram_bytes, 64u); // perfectly aligned, no waste
+
+    const SummaryStats& s = engine.summary();
+    DDR_CHECK_EQ(s.total_bytes, static_cast<uint64_t>(32 + 64 + 64));
+    DDR_CHECK_EQ(s.total_dram_bytes, static_cast<uint64_t>(64 + 128 + 64));
+    // efficiency = 160 / 256 * 100 = 62.5%
+    DDR_CHECK(s.burst_efficiency_pct > 62.0 && s.burst_efficiency_pct < 63.0);
+}

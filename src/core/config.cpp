@@ -37,6 +37,7 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.rows = static_cast<int>(t.get_int("rows", cfg.rows));
         cfg.columns = static_cast<int>(t.get_int("columns", cfg.columns));
         cfg.data_bus_bytes = static_cast<int>(t.get_int("data_bus_bytes", cfg.data_bus_bytes));
+        cfg.burst_beats = static_cast<int>(t.get_int("burst_beats", cfg.burst_beats));
         cfg.clock_mhz = t.get_num("clock_mhz", cfg.clock_mhz);
     }
 

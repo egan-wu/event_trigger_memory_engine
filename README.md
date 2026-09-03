@@ -91,10 +91,14 @@ See `examples/ddrc_config.example.json` for a full example. Sections:
 
 - **`topology`**: `channels`, `ranks_per_channel`, `bankgroups`,
   `banks_per_group`, `rows`, `columns`, `data_bus_bytes` (bytes moved per
-  clock per channel), `clock_mhz`. Set `clock_mhz` to the DDR speed grade's
-  effective MT/s number (e.g. `3200` for DDR4-3200) — this model treats it as
-  a single-pumped "effective transfer clock" rather than modeling DDR's
-  double-data-rate explicitly, so this is the number that makes
+  clock per channel), `burst_beats` (beats per DRAM burst — DRAM never
+  transfers fewer than this per access, so it's what drives over-fetch
+  accounting below; default `8` matches DDR4 BL8, use `4` for burst-chop
+  (BC4), or whatever reproduces your part's real minimum access granularity),
+  `clock_mhz`. Set `clock_mhz` to the DDR speed grade's effective MT/s number
+  (e.g. `3200` for DDR4-3200) — this model treats it as a single-pumped
+  "effective transfer clock" rather than modeling DDR's double-data-rate
+  explicitly, so this is the number that makes
   `data_bus_bytes * clock_mhz(MHz)/1000 * channels` line up with the
   datasheet peak GB/s.
 - **`address_mapping`**: for each of `channel`, `rank`, `bankgroup`, `bank`,
@@ -149,12 +153,15 @@ currently retained in `results()` — see the pruning section below.
 | field | meaning |
 |---|---|
 | `total_txns` | count of AXI transactions processed so far |
-| `total_bytes` | bytes transferred across all of them (`size_bytes * len_beats` per txn) |
+| `total_bytes` | **logical**: bytes actually requested (`size_bytes * len_beats` summed per txn) |
+| `total_dram_bytes` | **physical**: full burst-aligned bytes DRAM actually moved, always `>= total_bytes` — see "Over-fetch" below |
 | `total_cycles` | furthest simulated point reached — `max(complete_cycle)` across everything |
 | `sim_time_ns` | `total_cycles` converted to ns via the config's clock period |
-| `avg_bandwidth_gbps` | `total_bytes / sim_time_ns` — the actual estimate |
+| `avg_bandwidth_gbps` | `total_bytes / sim_time_ns` — useful throughput actually delivered to the requester |
+| `avg_dram_bandwidth_gbps` | `total_dram_bytes / sim_time_ns` — actual DRAM bus traffic, over-fetch included |
 | `peak_bandwidth_gbps` | theoretical peak from the config (`data_bus_bytes * clock_mhz/1000 * channels`) — not measured, just the ceiling |
-| `bandwidth_utilization_pct` | `avg_bandwidth_gbps / peak_bandwidth_gbps * 100` |
+| `bandwidth_utilization_pct` | `avg_dram_bandwidth_gbps / peak_bandwidth_gbps * 100` — physical bus utilization (deliberately the physical number, not the logical one, since that's what the bus itself experiences) |
+| `burst_efficiency_pct` | `total_bytes / total_dram_bytes * 100` — 100% = every burst was fully useful, lower = over-fetch waste; see "Over-fetch" below |
 | `avg_latency_ns` | mean of every transaction's `(complete_cycle − issue_cycle)`, in ns |
 | `page_hit_rate_pct` / `row_conflict_rate_pct` / `row_empty_rate_pct` | classification of every *DRAM column command* (not every transaction — a burst spanning multiple banks/rows contributes multiple classifications); these three sum to 100% |
 | `refresh_overhead_pct` | % of total channel-cycles (`channels × total_cycles`) spent blocked on refresh |
@@ -175,12 +182,40 @@ out of order relative to each other).
 |---|---|
 | `txn_id` | engine-assigned sequential ID, returned by `push_txn()`/`ddrt_push_txn()` at push time |
 | `core_id`, `type` (`AR`/`AW`), `addr` | echoed from the input transaction |
-| `bytes` | total burst size (`size_bytes * len_beats`) |
+| `bytes` | **logical**: total burst size requested (`size_bytes * len_beats`) |
+| `dram_bytes` | **physical**: full burst-aligned bytes DRAM actually moved for this transaction, `>= bytes` — see "Over-fetch" below |
 | `issue_cycle` | the cycle the engine determined this could be dispatched, given its outstanding cap, its core's port, and any barrier gate |
 | `complete_cycle` | the cycle the last chunk of this burst finished transferring |
 | `latency_ns` | `(complete_cycle − issue_cycle)` converted to ns |
 | `dominant_row_status` | `hit`/`conflict`/`empty` classification of the burst's *first* DRAM command chunk only |
 | `hits`, `conflicts`, `empties` | the same classification, but counted across *every* chunk of this burst — relevant once a burst is large enough to span multiple banks/rows (see "Engine model" above) |
+
+### Over-fetch: `bytes` vs `dram_bytes`
+
+DRAM never transfers less than one full burst (`burst_beats` beats — see
+`topology` above) per access, no matter how few bytes you actually asked for.
+If an AR/AW's byte range doesn't land on a burst-aligned boundary — because
+it's smaller than one burst, or its start address isn't aligned to one — the
+DDRC still has to issue a full burst to get it, and everything outside your
+requested range comes along for free but wasted. `bytes` is what was
+requested; `dram_bytes` is what physically had to move, always `>= bytes`.
+
+Comparing the two (per-transaction, or in aggregate via
+`burst_efficiency_pct = total_bytes / total_dram_bytes * 100`) is a direct
+health check on how the DMA is issuing its bursts: close to 100% means AXI
+requests are landing cleanly on burst-aligned boundaries with little waste;
+noticeably below 100% is a real signal to go check the AR/AW sizing and
+alignment logic, not a DDRC configuration problem. Concretely, from
+`tests/test_engine_basic.cpp`'s `overfetch_metrics_for_undersized_and_misaligned_reads`
+(64B bursts, `data_bus_bytes=8` × `burst_beats=8`):
+
+| request | `bytes` | `dram_bytes` | why |
+|---|---|---|---|
+| 32B, burst-aligned address | 32 | 64 | fits in one burst window, half wasted |
+| 64B, address 32B into a window | 64 | 128 | straddles two windows — two full bursts for one logical burst's worth of data |
+| 64B, burst-aligned address | 64 | 64 | exactly one window, no waste |
+
+Aggregate efficiency for that mix: `160 / 256 = 62.5%`.
 
 ## Feeding it from a long-running DMA model (no "end of log")
 

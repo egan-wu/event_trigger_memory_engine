@@ -96,11 +96,14 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     const ddrtiming::SummaryStats& s = engine->engine->summary();
     out->total_txns = s.total_txns;
     out->total_bytes = s.total_bytes;
+    out->total_dram_bytes = s.total_dram_bytes;
     out->total_cycles = s.total_cycles;
     out->sim_time_ns = s.sim_time_ns;
     out->avg_bandwidth_gbps = s.avg_bandwidth_gbps;
+    out->avg_dram_bandwidth_gbps = s.avg_dram_bandwidth_gbps;
     out->peak_bandwidth_gbps = s.peak_bandwidth_gbps;
     out->bandwidth_utilization_pct = s.bandwidth_utilization_pct;
+    out->burst_efficiency_pct = s.burst_efficiency_pct;
     out->avg_latency_ns = s.avg_latency_ns;
     out->page_hit_rate_pct = s.page_hit_rate_pct;
     out->row_conflict_rate_pct = s.row_conflict_rate_pct;
@@ -128,6 +131,8 @@ int ddrt_get_result_at(ddrt_engine_t* engine, uint64_t index, ddrt_txn_result_t*
     out->complete_cycle = r.complete_cycle;
     out->latency_ns = r.latency_ns;
     out->dominant_row_status = static_cast<ddrt_row_status_t>(r.dominant_row_status);
+    out->bytes = r.bytes;
+    out->dram_bytes = r.dram_bytes;
     out->hits = r.hits;
     out->conflicts = r.conflicts;
     out->empties = r.empties;

@@ -16,12 +16,15 @@ class ChannelScheduler;
 
 struct SummaryStats {
     uint64_t total_txns = 0;
-    uint64_t total_bytes = 0;
+    uint64_t total_bytes = 0;      // logical: bytes actually requested by AXI bursts
+    uint64_t total_dram_bytes = 0; // physical: full burst-aligned bytes DRAM actually moved (>= total_bytes)
     uint64_t total_cycles = 0;
     double sim_time_ns = 0.0;
-    double avg_bandwidth_gbps = 0.0;
+    double avg_bandwidth_gbps = 0.0;     // total_bytes / sim_time_ns -- useful throughput delivered
+    double avg_dram_bandwidth_gbps = 0.0; // total_dram_bytes / sim_time_ns -- actual DRAM bus traffic
     double peak_bandwidth_gbps = 0.0;
-    double bandwidth_utilization_pct = 0.0;
+    double bandwidth_utilization_pct = 0.0; // avg_dram_bandwidth_gbps / peak -- physical bus utilization
+    double burst_efficiency_pct = 0.0;      // total_bytes / total_dram_bytes -- 100% = no over-fetch waste
     double avg_latency_ns = 0.0;
     double page_hit_rate_pct = 0.0;
     double row_conflict_rate_pct = 0.0;
@@ -125,6 +128,7 @@ private:
     // running summary correct regardless of how much of results() is pruned.
     uint64_t cum_total_txns_ = 0;
     uint64_t cum_total_bytes_ = 0;
+    uint64_t cum_total_dram_bytes_ = 0;
     uint64_t cum_max_complete_cycle_ = 0;
     double cum_latency_sum_ns_ = 0.0;
 

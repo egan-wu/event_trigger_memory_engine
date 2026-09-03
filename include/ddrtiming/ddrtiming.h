@@ -35,16 +35,21 @@ typedef struct {
     uint32_t hits;
     uint32_t conflicts;
     uint32_t empties;
+    uint32_t bytes;      /* logical: bytes this AXI burst actually requested */
+    uint32_t dram_bytes; /* physical: full burst-aligned bytes DRAM actually moved (>= bytes) */
 } ddrt_txn_result_t;
 
 typedef struct {
     uint64_t total_txns;
-    uint64_t total_bytes;
+    uint64_t total_bytes;      /* logical: bytes actually requested by AXI bursts */
+    uint64_t total_dram_bytes; /* physical: full burst-aligned bytes DRAM actually moved (>= total_bytes) */
     uint64_t total_cycles;
     double sim_time_ns;
-    double avg_bandwidth_gbps;
+    double avg_bandwidth_gbps;      /* total_bytes / sim_time_ns -- useful throughput delivered */
+    double avg_dram_bandwidth_gbps; /* total_dram_bytes / sim_time_ns -- actual DRAM bus traffic */
     double peak_bandwidth_gbps;
-    double bandwidth_utilization_pct;
+    double bandwidth_utilization_pct; /* avg_dram_bandwidth_gbps / peak -- physical bus utilization */
+    double burst_efficiency_pct;      /* total_bytes / total_dram_bytes * 100 -- 100% = no over-fetch waste */
     double avg_latency_ns;
     double page_hit_rate_pct;
     double row_conflict_rate_pct;

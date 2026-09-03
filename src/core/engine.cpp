@@ -9,7 +9,6 @@
 namespace ddrtiming {
 
 namespace {
-constexpr uint32_t kBurstBeatsPerChunk = 8; // fixed BL8-style chunking assumption, documented in README
 constexpr uint64_t kMinIssueSpacingCycles = 1;
 }
 
@@ -130,22 +129,29 @@ void Engine::run() {
         res.issue_cycle = issue_cycle;
         res.bytes = static_cast<uint32_t>(total_bytes);
 
-        uint64_t chunk_bytes = static_cast<uint64_t>(std::max(1, cfg_.data_bus_bytes)) * kBurstBeatsPerChunk;
-        uint32_t num_chunks = static_cast<uint32_t>((total_bytes + chunk_bytes - 1) / chunk_bytes);
-        if (num_chunks == 0) num_chunks = 1;
+        // DRAM only ever transfers whole burst-aligned windows (chunk_bytes
+        // each) -- never a partial burst -- so the windows touched are
+        // determined by aligning [addr, addr+total_bytes) to that grid, not
+        // by walking chunk_bytes forward from addr itself (addr need not be
+        // aligned). Every window costs a full burst's worth of physical
+        // transfer time and dram_bytes, even where it only partially
+        // overlaps what was actually requested -- that gap is over-fetch.
+        uint64_t chunk_bytes = static_cast<uint64_t>(std::max(1, cfg_.data_bus_bytes)) *
+                                static_cast<uint64_t>(std::max(1, cfg_.burst_beats));
+        uint64_t first_window = (txn.addr / chunk_bytes) * chunk_bytes;
+        uint64_t last_window = ((txn.addr + total_bytes - 1) / chunk_bytes) * chunk_bytes;
+        uint32_t num_chunks = static_cast<uint32_t>((last_window - first_window) / chunk_bytes) + 1;
 
         uint64_t max_complete = issue_cycle;
         for (uint32_t i = 0; i < num_chunks; ++i) {
-            uint64_t chunk_addr = txn.addr + static_cast<uint64_t>(i) * chunk_bytes;
-            uint64_t remaining = total_bytes - static_cast<uint64_t>(i) * chunk_bytes;
-            uint32_t bytes_i = static_cast<uint32_t>(std::min<uint64_t>(chunk_bytes, remaining));
+            uint64_t window_addr = first_window + static_cast<uint64_t>(i) * chunk_bytes;
 
             DramCommand cmd;
             cmd.txn_id = txn.txn_id;
             cmd.core_id = txn.core_id;
             cmd.type = txn.type;
-            cmd.addr = decoder.decode(chunk_addr);
-            cmd.bytes = bytes_i;
+            cmd.addr = decoder.decode(window_addr);
+            cmd.bytes = static_cast<uint32_t>(chunk_bytes); // physical: always a full burst
             cmd.seq_in_txn = i;
             cmd.total_in_txn = num_chunks;
 
@@ -163,10 +169,12 @@ void Engine::run() {
 
         res.complete_cycle = max_complete;
         res.latency_ns = static_cast<double>(max_complete - issue_cycle) * cfg_.clock_period_ns();
+        res.dram_bytes = num_chunks * static_cast<uint32_t>(chunk_bytes);
         results_.push_back(res);
 
         cum_total_txns_++;
         cum_total_bytes_ += res.bytes;
+        cum_total_dram_bytes_ += res.dram_bytes;
         cum_latency_sum_ns_ += res.latency_ns;
         cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
 
@@ -210,15 +218,20 @@ void Engine::compute_summary() {
     SummaryStats s;
     s.total_txns = cum_total_txns_;
     s.total_bytes = cum_total_bytes_;
+    s.total_dram_bytes = cum_total_dram_bytes_;
     s.total_cycles = cum_max_complete_cycle_;
     s.sim_time_ns = static_cast<double>(cum_max_complete_cycle_) * cfg_.clock_period_ns();
     s.peak_bandwidth_gbps = cfg_.peak_bandwidth_gbps();
 
     if (s.sim_time_ns > 0.0) {
         s.avg_bandwidth_gbps = static_cast<double>(s.total_bytes) / s.sim_time_ns;
+        s.avg_dram_bandwidth_gbps = static_cast<double>(s.total_dram_bytes) / s.sim_time_ns;
     }
     if (s.peak_bandwidth_gbps > 0.0) {
-        s.bandwidth_utilization_pct = s.avg_bandwidth_gbps / s.peak_bandwidth_gbps * 100.0;
+        s.bandwidth_utilization_pct = s.avg_dram_bandwidth_gbps / s.peak_bandwidth_gbps * 100.0;
+    }
+    if (s.total_dram_bytes > 0) {
+        s.burst_efficiency_pct = static_cast<double>(s.total_bytes) / static_cast<double>(s.total_dram_bytes) * 100.0;
     }
     if (s.total_txns > 0) {
         s.avg_latency_ns = cum_latency_sum_ns_ / static_cast<double>(s.total_txns);
