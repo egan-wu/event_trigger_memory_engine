@@ -134,6 +134,54 @@ tCCD-spaced column commands, R/W bus turnaround, and periodic refresh
 insertion. See `src/core/command_queue.cpp` and `src/core/engine.cpp` for the
 exact scheduling logic and its comments.
 
+## Report format
+
+Two ways to read results, both backed by the same data: `ddrt_write_report_json()`
+(JSON file, what the CLI's `--out` writes) and `ddrt_get_summary()` /
+`ddrt_get_result_at()` (the C API's typed structs, `ddrt_summary_t` /
+`ddrt_txn_result_t` — identical fields to the JSON, just accessed
+programmatically instead of parsed from a file). `summary()`/`ddrt_get_summary()`
+is always cumulative since the engine was created, regardless of what's
+currently retained in `results()` — see the pruning section below.
+
+### Summary (`ddrt_summary_t`, JSON `"summary"` object)
+
+| field | meaning |
+|---|---|
+| `total_txns` | count of AXI transactions processed so far |
+| `total_bytes` | bytes transferred across all of them (`size_bytes * len_beats` per txn) |
+| `total_cycles` | furthest simulated point reached — `max(complete_cycle)` across everything |
+| `sim_time_ns` | `total_cycles` converted to ns via the config's clock period |
+| `avg_bandwidth_gbps` | `total_bytes / sim_time_ns` — the actual estimate |
+| `peak_bandwidth_gbps` | theoretical peak from the config (`data_bus_bytes * clock_mhz/1000 * channels`) — not measured, just the ceiling |
+| `bandwidth_utilization_pct` | `avg_bandwidth_gbps / peak_bandwidth_gbps * 100` |
+| `avg_latency_ns` | mean of every transaction's `(complete_cycle − issue_cycle)`, in ns |
+| `page_hit_rate_pct` / `row_conflict_rate_pct` / `row_empty_rate_pct` | classification of every *DRAM column command* (not every transaction — a burst spanning multiple banks/rows contributes multiple classifications); these three sum to 100% |
+| `refresh_overhead_pct` | % of total channel-cycles (`channels × total_cycles`) spent blocked on refresh |
+| `turnaround_overhead_pct` | % of total channel-cycles spent on R↔W bus turnaround |
+
+Not currently broken out: no per-channel or per-bank split — everything above
+is summed across all channels/banks into one set of rates. No queue-occupancy
+histogram either. Both are in the "explicitly out of scope" list below.
+
+### Per-transaction (`ddrt_txn_result_t`, JSON `"transactions"` array entries)
+
+One entry per AXI transaction (AR/AW — barriers never produce an entry), in
+dispatch order (chronological, *not* necessarily push order — see the
+per-AXI-ID outstanding discussion above for why independent IDs can complete
+out of order relative to each other).
+
+| field | meaning |
+|---|---|
+| `txn_id` | engine-assigned sequential ID, returned by `push_txn()`/`ddrt_push_txn()` at push time |
+| `core_id`, `type` (`AR`/`AW`), `addr` | echoed from the input transaction |
+| `bytes` | total burst size (`size_bytes * len_beats`) |
+| `issue_cycle` | the cycle the engine determined this could be dispatched, given its outstanding cap, its core's port, and any barrier gate |
+| `complete_cycle` | the cycle the last chunk of this burst finished transferring |
+| `latency_ns` | `(complete_cycle − issue_cycle)` converted to ns |
+| `dominant_row_status` | `hit`/`conflict`/`empty` classification of the burst's *first* DRAM command chunk only |
+| `hits`, `conflicts`, `empties` | the same classification, but counted across *every* chunk of this burst — relevant once a burst is large enough to span multiple banks/rows (see "Engine model" above) |
+
 ## Feeding it from a long-running DMA model (no "end of log")
 
 `run()` is safe to call repeatedly and is cheap when there's nothing new: each
