@@ -332,10 +332,26 @@ owns except the engine itself). Convention: functions returning `int` give
 `0` on success, `-1` on failure — check `ddrt_last_error(engine)` for why.
 Passing a `NULL` engine to any function is handled gracefully (returns `-1` /
 `0` / empty rather than crashing), which is what makes `ddrt_last_error(NULL)`
-meaningful specifically for a failed `ddrt_create()`. None of this is
-thread-safe: don't call into the same `ddrt_engine_t*` from more than one
-thread without your own locking (e.g. a daemon pushing on one thread and
-calling `ddrt_run()` on another needs a mutex around both).
+meaningful specifically for a failed `ddrt_create()`.
+
+**Thread safety**: every call on a given `ddrt_engine_t*` is internally
+mutex-protected, so it's safe to call from multiple threads without your own
+locking — e.g. one OS thread per DMA core, all pushing into the same handle
+concurrently, works correctly. This is a coarse per-engine lock (one call
+completes before the next starts), not real parallelism inside the engine,
+but that costs you nothing: the scheduling algorithm is a single sequential
+event-driven simulation regardless, so calls were never going to make
+progress concurrently anyway — the lock exists purely to make concurrent
+*callers* safe, not to speed anything up. Note it does not make
+`ddrt_destroy()` safe to call while another thread might still be calling
+into that same handle — no amount of internal locking fixes an object-
+lifetime race; make sure every other thread is done with the engine first.
+
+Modeling multiple concurrent DMA cores does **not** require multiple OS
+threads in the first place — `AxiTxn::core_id` already models that at the
+simulation level (see "Engine model" above). Real OS-level threading is
+supported so it doesn't get in your way if that's how your caller happens to
+be structured, not because it's the way to represent concurrency here.
 
 | function | returns | does |
 |---|---|---|

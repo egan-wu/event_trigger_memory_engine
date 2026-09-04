@@ -1,6 +1,7 @@
 #include "ddrtiming/ddrtiming.h"
 
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include "../core/config.hpp"
@@ -12,9 +13,23 @@ namespace {
 thread_local std::string g_create_error;
 }
 
+// One mutex per engine, held for the duration of every call that touches
+// engine->engine or engine->last_error. The scheduling algorithm itself is
+// inherently sequential (a single event-driven simulation), so serializing
+// calls costs nothing beyond what the algorithm already required -- this
+// exists purely so that a caller modeling N concurrent DMA cores as N OS
+// threads, each calling straight into this same handle, gets correct
+// accounting instead of a silent data race on results()/summary()/internal
+// state. Concurrent DMA cores are already modeled via AxiTxn::core_id; you
+// do not need real OS-level parallelism to represent them -- see README.
+// This does NOT make ddrt_destroy() safe to call while another thread might
+// still be calling into the same handle -- that's an object-lifetime race
+// no amount of internal locking can fix; the caller must ensure no other
+// thread is mid-call before destroying.
 struct ddrt_engine {
     std::unique_ptr<ddrtiming::Engine> engine;
     std::string last_error;
+    std::mutex mutex;
 };
 
 ddrt_engine_t* ddrt_create(const char* config_json_path) {
@@ -34,6 +49,7 @@ void ddrt_destroy(ddrt_engine_t* engine) { delete engine; }
 
 int ddrt_push_txn(ddrt_engine_t* engine, const ddrt_axi_txn_t* txn, uint64_t* out_txn_id) {
     if (!engine || !txn) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         ddrtiming::AxiTxn t;
         t.core_id = txn->core_id;
@@ -56,6 +72,7 @@ int ddrt_push_txn(ddrt_engine_t* engine, const ddrt_axi_txn_t* txn, uint64_t* ou
 
 int ddrt_push_barrier(ddrt_engine_t* engine, int core_id) {
     if (!engine) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         engine->engine->push_barrier(core_id);
         return 0;
@@ -67,6 +84,7 @@ int ddrt_push_barrier(ddrt_engine_t* engine, int core_id) {
 
 int ddrt_load_log_file(ddrt_engine_t* engine, int core_id, const char* log_csv_path) {
     if (!engine || !log_csv_path) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         auto entries = ddrtiming::parse_axi_log_file(log_csv_path, core_id);
         for (const auto& e : entries) {
@@ -82,6 +100,7 @@ int ddrt_load_log_file(ddrt_engine_t* engine, int core_id, const char* log_csv_p
 
 int ddrt_run(ddrt_engine_t* engine) {
     if (!engine) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         engine->engine->run();
         return 0;
@@ -93,6 +112,7 @@ int ddrt_run(ddrt_engine_t* engine) {
 
 int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     const ddrtiming::SummaryStats& s = engine->engine->summary();
     out->total_txns = s.total_txns;
     out->total_bytes = s.total_bytes;
@@ -115,11 +135,13 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
 
 uint64_t ddrt_get_num_results(ddrt_engine_t* engine) {
     if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     return engine->engine->results().size();
 }
 
 int ddrt_get_result_at(ddrt_engine_t* engine, uint64_t index, ddrt_txn_result_t* out) {
     if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     const auto& results = engine->engine->results();
     if (index >= results.size()) return -1;
     const ddrtiming::TxnResult& r = results[index];
@@ -141,6 +163,7 @@ int ddrt_get_result_at(ddrt_engine_t* engine, uint64_t index, ddrt_txn_result_t*
 
 int ddrt_prune_results_before(ddrt_engine_t* engine, uint64_t max_txn_id) {
     if (!engine) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         engine->engine->prune_results_before(max_txn_id);
         return 0;
@@ -152,6 +175,7 @@ int ddrt_prune_results_before(ddrt_engine_t* engine, uint64_t max_txn_id) {
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {
     if (!engine || !out_path) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
     try {
         ddrtiming::write_report_json(*engine->engine, out_path);
         return 0;
@@ -163,6 +187,7 @@ int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {
 
 const char* ddrt_last_error(ddrt_engine_t* engine) {
     if (!engine) return g_create_error.c_str();
+    std::lock_guard<std::mutex> lock(engine->mutex);
     return engine->last_error.c_str();
 }
 
