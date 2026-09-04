@@ -250,9 +250,12 @@ int main(int argc, char** argv) {
         if (frac >= 0.5) {
             std::ostringstream d;
             d << "outstanding_occupancy_pct was >= 90% in " << saturated_count << "/" << n << " windows ("
-              << (frac * 100.0) << "%) -- max_outstanding_per_id is likely the limiter for most of this "
-                 "trace, not DRAM timing itself. Consider re-running with a larger cap to check whether "
-                 "bandwidth improves.";
+              << (frac * 100.0) << "%) -- the per-(core, axi_id) outstanding pool stayed at or near "
+                 "max_outstanding_per_id for most of the trace, i.e. the stream never ran dry. That alone "
+                 "doesn't establish max_outstanding_per_id as the throughput limiter -- a workload with no "
+                 "supply shortage looks identical whether or not the cap is the binding constraint "
+                 "elsewhere in the pipeline; only a re-run at a different cap, compared on achieved "
+                 "bandwidth, can establish that.";
             add_finding("outstanding_saturated", "warning", 0, n - 1, d.str());
         }
     }
@@ -263,9 +266,8 @@ int main(int argc, char** argv) {
         if (avg_bank < 25.0) {
             std::ostringstream d;
             d << "bank_utilization_pct averaged " << avg_bank << "% across the whole trace -- traffic is "
-                 "concentrated on a small fraction of available banks. This limits bank-level parallelism "
-                 "independent of bus/outstanding saturation; check whether the address mapping's "
-                 "bank/bankgroup bits are actually varying across the access pattern.";
+                 "concentrated on a small fraction of available banks. This caps the number of banks "
+                 "available for concurrent scheduling, independent of bus or outstanding-cap saturation.";
             add_finding("bank_underutilized", "info", 0, n - 1, d.str());
         }
     }
@@ -294,8 +296,7 @@ int main(int argc, char** argv) {
                   << (seg_avg / med * 100.0) << "% of median).";
                 if (seg_cmds > 0) {
                     double conf_pct = static_cast<double>(seg_conf) / seg_cmds * 100.0;
-                    d << " Row-conflict rate in this range was " << conf_pct << "%"
-                      << (conf_pct > 30.0 ? " -- likely explains the drop (row conflicts, not bus/cap saturation)." : ".");
+                    d << " Row-conflict rate in this range was " << conf_pct << "%.";
                 }
                 add_finding("bandwidth_drop", "warning", w0, w1, d.str());
             }
