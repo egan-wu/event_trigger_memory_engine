@@ -64,6 +64,28 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     root.set("summary", std::move(summary));
     root.set("transactions", std::move(txns));
 
+    if (!engine.windows().empty()) {
+        double window_ns = engine.config().history_window_ns;
+        json::Value windows = json::Value::make_array();
+        for (size_t i = 0; i < engine.windows().size(); ++i) {
+            const WindowStats& w = engine.windows()[i];
+            json::Value wv = json::Value::make_object();
+            wv.set("window_index", static_cast<int64_t>(i));
+            wv.set("start_ns", static_cast<double>(i) * window_ns);
+            wv.set("bytes_read", static_cast<int64_t>(w.bytes_read));
+            wv.set("bytes_written", static_cast<int64_t>(w.bytes_written));
+            wv.set("dram_bytes", static_cast<int64_t>(w.dram_bytes));
+            wv.set("txn_count", static_cast<int64_t>(w.txn_count));
+            wv.set("hits", static_cast<int64_t>(w.hits));
+            wv.set("conflicts", static_cast<int64_t>(w.conflicts));
+            wv.set("empties", static_cast<int64_t>(w.empties));
+            double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
+            wv.set("avg_bandwidth_gbps", bw);
+            windows.push_back(std::move(wv));
+        }
+        root.set("windows", std::move(windows));
+    }
+
     std::ofstream f(out_path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open output path for report: " + out_path);
     f << root.dump(2);
@@ -89,6 +111,28 @@ std::string format_summary_text(const Engine& engine) {
     os << "Refresh overhead:        " << s.refresh_overhead_pct << " %\n";
     os << "R/W turnaround overhead: " << s.turnaround_overhead_pct << " %\n";
     return os.str();
+}
+
+void write_windowed_csv(const Engine& engine, const std::string& out_path) {
+    if (engine.windows().empty()) {
+        throw std::runtime_error(
+            "no windowed history available -- set \"reporting\": {\"history_window_ns\": N} in the config");
+    }
+    double window_ns = engine.config().history_window_ns;
+
+    std::ofstream f(out_path, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open output path for windowed CSV: " + out_path);
+
+    f << "window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,"
+         "hits,conflicts,empties,avg_bandwidth_gbps\n";
+    for (size_t i = 0; i < engine.windows().size(); ++i) {
+        const WindowStats& w = engine.windows()[i];
+        double start_ns = static_cast<double>(i) * window_ns;
+        double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
+        f << i << ',' << start_ns << ',' << w.bytes_read << ',' << w.bytes_written << ','
+          << w.dram_bytes << ',' << w.txn_count << ',' << w.hits << ',' << w.conflicts << ','
+          << w.empties << ',' << bw << '\n';
+    }
 }
 
 } // namespace ddrtiming

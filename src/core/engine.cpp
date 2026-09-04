@@ -19,6 +19,11 @@ Engine::Engine(DdrcConfig cfg) : cfg_(std::move(cfg)) {
         channels_.push_back(std::make_unique<ChannelScheduler>(cfg_, c));
     }
     max_out_ = static_cast<uint64_t>(std::max(1, cfg_.max_outstanding_per_id));
+
+    if (cfg_.history_window_ns > 0.0) {
+        history_window_cycles_ = cfg_.ns_to_cycles(cfg_.history_window_ns);
+        if (history_window_cycles_ == 0) history_window_cycles_ = 1; // avoid a degenerate 0-cycle window
+    }
 }
 
 Engine::~Engine() = default;
@@ -182,6 +187,19 @@ void Engine::run() {
         cum_total_dram_bytes_ += res.dram_bytes;
         cum_latency_sum_ns_ += res.latency_ns;
         cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
+
+        if (history_window_cycles_ > 0) {
+            size_t window_index = static_cast<size_t>(res.issue_cycle / history_window_cycles_);
+            if (windows_.size() <= window_index) windows_.resize(window_index + 1);
+            WindowStats& w = windows_[window_index];
+            if (res.type == TxnType::Read) w.bytes_read += res.bytes;
+            else w.bytes_written += res.bytes;
+            w.dram_bytes += res.dram_bytes;
+            w.txn_count++;
+            w.hits += res.hits;
+            w.conflicts += res.conflicts;
+            w.empties += res.empties;
+        }
 
         idc.outstanding.insert(max_complete);
         idc.pending.pop_front();

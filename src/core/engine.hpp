@@ -33,6 +33,23 @@ struct SummaryStats {
     double turnaround_overhead_pct = 0.0;
 };
 
+// One fixed-size bucket of simulated time (history_window_ns in the config),
+// indexed by a transaction's issue_cycle. Accumulated incrementally at
+// dispatch time -- like SummaryStats, unaffected by prune_results_before()
+// -- so a caller can build a bandwidth/byte-access history independent of
+// how often it happens to call run() or drain/prune results(). See README
+// "Windowed history".
+// start_ns for window i is always i * history_window_ns (derive it from the
+// index, not stored here -- an untouched/empty window still has a well-
+// defined start, and deriving from the index keeps that correct for free).
+struct WindowStats {
+    uint64_t bytes_read = 0;
+    uint64_t bytes_written = 0;
+    uint64_t dram_bytes = 0;
+    uint64_t txn_count = 0;
+    uint64_t hits = 0, conflicts = 0, empties = 0;
+};
+
 // One independent dispatch stream per (core_id, segment, axi_id): AXI
 // guarantees same-ID transactions complete in the order issued, but different
 // IDs from the same core may be independently outstanding and complete out of
@@ -93,6 +110,12 @@ public:
     const SummaryStats& summary() const { return summary_; }
     const DdrcConfig& config() const { return cfg_; }
 
+    // Windowed bandwidth/byte-access history, one entry per history_window_ns
+    // bucket of simulated time (config; 0 disables this, and the vector stays
+    // empty). Grows as dispatch reaches later windows; never shrinks, and is
+    // NOT affected by prune_results_before() -- see WindowStats above.
+    const std::vector<WindowStats>& windows() const { return windows_; }
+
     // Removes every result with txn_id <= max_txn_id from results() (order-
     // independent -- results() is dispatch-ordered, not txn_id-ordered, since
     // independent AXI-ID streams can complete out of order relative to each
@@ -131,6 +154,9 @@ private:
     uint64_t cum_total_dram_bytes_ = 0;
     uint64_t cum_max_complete_cycle_ = 0;
     double cum_latency_sum_ns_ = 0.0;
+
+    std::vector<WindowStats> windows_;
+    uint64_t history_window_cycles_ = 0; // 0 = windowed accounting disabled
 
     // Persistent incremental scheduling state (survives across run() calls).
     std::map<int, std::vector<Segment>> segments_;

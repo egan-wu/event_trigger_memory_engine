@@ -58,6 +58,24 @@ typedef struct {
     double turnaround_overhead_pct;
 } ddrt_summary_t;
 
+/* One fixed-size bucket of simulated time (topology.history_window_ns in the
+ * config; disabled if that's 0 or unset). Accumulated incrementally at
+ * dispatch time -- like ddrt_summary_t, unaffected by
+ * ddrt_prune_results_before() -- so you can build a bandwidth/byte-access
+ * history independent of how often you happen to call ddrt_run() or drain
+ * results. See README "Windowed history". */
+typedef struct {
+    uint64_t window_index;
+    double start_ns;
+    double duration_ns;   /* the configured history_window_ns */
+    uint64_t bytes_read;
+    uint64_t bytes_written;
+    uint64_t dram_bytes;
+    uint64_t txn_count;
+    uint64_t hits, conflicts, empties;
+    double avg_bandwidth_gbps; /* (bytes_read + bytes_written) / duration_ns */
+} ddrt_window_stats_t;
+
 /* Create an engine from a DDRC JSON config file. Returns NULL on failure. */
 ddrt_engine_t* ddrt_create(const char* config_json_path);
 
@@ -93,6 +111,12 @@ int ddrt_get_result_at(ddrt_engine_t* engine, uint64_t index, ddrt_txn_result_t*
  * no way to recover a pruned result, so only prune what you've already
  * consumed. Returns 0 on success. */
 int ddrt_prune_results_before(ddrt_engine_t* engine, uint64_t max_txn_id);
+
+/* Windowed bandwidth/byte-access history -- requires "reporting":
+ * {"history_window_ns": N} in the config; returns 0 windows otherwise.
+ * Windows never shrink and are unaffected by ddrt_prune_results_before(). */
+uint64_t ddrt_get_num_windows(ddrt_engine_t* engine);
+int ddrt_get_window_at(ddrt_engine_t* engine, uint64_t index, ddrt_window_stats_t* out);
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path);
 

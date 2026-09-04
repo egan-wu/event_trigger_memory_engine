@@ -36,10 +36,13 @@ ctest --test-dir build
 ```bash
 ./build/ddrtiming_cli --config examples/ddrc_config.example.json \
     --log examples/core0_axi.example.csv \
-    --out report.json
+    --out report.json \
+    --windowed-csv history.csv
 ```
 
 Each `--log` becomes `core_id = 0, 1, 2, ...` in the order given.
+`--windowed-csv` requires `"reporting": {"history_window_ns": N}` in the
+config — see "Windowed history" below.
 
 ## The core assumption: no timestamps, and what that means
 
@@ -126,6 +129,9 @@ See `examples/ddrc_config.example.json` for a full example. Sections:
 - **`ddrc_resources`**: `command_queue_depth` (per channel, bounds
   backpressure), `max_outstanding_per_id` (see above), `scheduling_policy`
   (currently informational — the engine always uses one FR-FCFS-lite policy).
+- **`reporting`**: `history_window_ns` — bucket size for the windowed
+  bandwidth/byte-access history (0/omitted disables it). See "Windowed
+  history" below.
 
 ## Engine model, briefly
 
@@ -216,6 +222,37 @@ alignment logic, not a DDRC configuration problem. Concretely, from
 | 64B, burst-aligned address | 64 | 64 | exactly one window, no waste |
 
 Aggregate efficiency for that mix: `160 / 256 = 62.5%`.
+
+## Windowed history
+
+`summary()` gives one number for the whole run; sometimes you want *when*
+performance changed, not just the average — e.g. a bandwidth-over-time chart
+that shows exactly which part of a workload dropped into row-conflicts. Set
+`"reporting": {"history_window_ns": N}` in the config to turn this on: every
+dispatched transaction is bucketed by its `issue_cycle` into a fixed-`N`-ns
+window, accumulated incrementally (bytes read/written, DRAM bytes,
+hit/conflict/empty counts, transaction count) — the same technique as
+`summary()`'s cumulative counters, so windows are **unaffected by
+`prune_results_before()`** and cost nothing extra to maintain. Disabled by
+default (`history_window_ns: 0`).
+
+A critical point this feature exists specifically to get right: **don't use
+however often you happen to call `run()` as your time axis.** The engine's
+simulated clock and your wall-clock tick cadence are different clocks that
+don't move at a fixed ratio to each other — how much simulated time elapses
+between two `run()` calls depends on how much traffic was pushed and how the
+DDRC scheduled it, not on how much real time passed. Bucketing by real-world
+polling interval produces a distorted chart; bucketing by `issue_cycle` (what
+this does) gives you the DDRC's own timeline, which is the one that's
+actually meaningful to plot.
+
+`ddrt_get_num_windows()` / `ddrt_get_window_at()` (C API) or `Engine::windows()`
+(C++) read it back; the CLI's `--windowed-csv <path>` writes it straight to
+CSV for plotting, and `ddrt_write_report_json()` includes a `"windows"` array
+automatically whenever windowing is enabled. This library intentionally does
+not render charts itself — no third-party dependencies, stays a portable
+single binary — it only computes the numbers; plotting is a job for whatever
+consumes the CSV/JSON.
 
 ## Feeding it from a long-running DMA model (no "end of log")
 
@@ -365,7 +402,9 @@ be structured, not because it's the way to represent concurrency here.
 | `ddrt_get_num_results(engine)` | `uint64_t` | count of currently-retained per-transaction results |
 | `ddrt_get_result_at(engine, index, &out)` | `int` | one per-transaction result by index into `out` — see "Report format" above |
 | `ddrt_prune_results_before(engine, max_txn_id)` | `int` | free retained results with `txn_id <= max_txn_id` — see "Feeding it from a long-running DMA model" above |
-| `ddrt_write_report_json(engine, out_path)` | `int` | write the full summary + per-transaction report to a JSON file |
+| `ddrt_get_num_windows(engine)` | `uint64_t` | count of windows in the bandwidth/byte-access history — see "Windowed history" above |
+| `ddrt_get_window_at(engine, index, &out)` | `int` | one window's stats by index into `out` |
+| `ddrt_write_report_json(engine, out_path)` | `int` | write the full summary + per-transaction report (+ windowed history, if enabled) to a JSON file |
 | `ddrt_last_error(engine)` | `const char*` | why the last call on this engine failed; pass `NULL` to read a failed `ddrt_create()`'s error instead |
 | `ddrt_version(void)` | `const char*` | library version string |
 
