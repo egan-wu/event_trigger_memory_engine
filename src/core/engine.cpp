@@ -120,6 +120,11 @@ void Engine::run() {
         const AxiTxn& txn = idc.pending.front();
         uint64_t total_bytes = static_cast<uint64_t>(txn.size_bytes) * txn.len_beats;
         if (total_bytes == 0) total_bytes = txn.size_bytes;
+        // A genuinely zero-sized transaction (size_bytes==0 and len_beats==0)
+        // would otherwise underflow the window math below (txn.addr + 0 - 1);
+        // treat it as the smallest possible access rather than corrupting
+        // num_chunks into a huge/wrapped value.
+        if (total_bytes == 0) total_bytes = 1;
 
         TxnResult res;
         res.txn_id = txn.txn_id;

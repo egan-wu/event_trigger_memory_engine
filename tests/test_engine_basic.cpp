@@ -228,3 +228,31 @@ DDRTEST(overfetch_metrics_for_undersized_and_misaligned_reads) {
     // efficiency = 160 / 256 * 100 = 62.5%
     DDR_CHECK(s.burst_efficiency_pct > 62.0 && s.burst_efficiency_pct < 63.0);
 }
+
+DDRTEST(zero_sized_transaction_does_not_underflow_chunk_math) {
+    // size_bytes=0 and len_beats=0 together used to leave total_bytes at 0,
+    // which underflowed (txn.addr + total_bytes - 1) in the burst-window
+    // computation and could produce a huge/garbage num_chunks. Must not
+    // hang, crash, or corrupt accounting for other, well-formed transactions.
+    DdrcConfig cfg = make_test_config();
+    Engine engine(cfg);
+
+    AxiTxn degenerate;
+    degenerate.core_id = 0;
+    degenerate.type = TxnType::Read;
+    degenerate.axi_id = 1;
+    degenerate.addr = 0x000;
+    degenerate.size_bytes = 0;
+    degenerate.len_beats = 0;
+    engine.push_txn(degenerate);
+
+    engine.push_txn(make_read(0x800, /*axi_id=*/2)); // ordinary, must still work fine
+
+    engine.run();
+    const auto& r = engine.results();
+    DDR_CHECK_EQ(r.size(), static_cast<size_t>(2));
+    DDR_CHECK(r[0].complete_cycle >= r[0].issue_cycle);
+    DDR_CHECK(r[0].dram_bytes >= r[0].bytes);
+    DDR_CHECK(r[1].complete_cycle >= r[1].issue_cycle);
+    DDR_CHECK_EQ(r[1].bytes, 64u); // ordinary transaction unaffected
+}
