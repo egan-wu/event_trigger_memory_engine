@@ -39,6 +39,8 @@ add_executable(ddrtiming_tests
     tests/test_main.cpp
     tests/test_address_decoder.cpp
     tests/test_engine_basic.cpp
+    tests/test_command_queue.cpp
+    tests/test_engine_stress.cpp
 )
 target_include_directories(ddrtiming_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 target_link_libraries(ddrtiming_tests PRIVATE ddrtiming)
