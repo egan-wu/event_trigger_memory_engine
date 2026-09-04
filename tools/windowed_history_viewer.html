@@ -1,0 +1,480 @@
+<!--
+  Windowed history viewer — a standalone, dependency-free companion to
+  ddrtiming's --windowed-csv output. Open this file directly in a browser
+  (no server, no build step) and load any CSV produced by:
+    ddrtiming_cli ... --windowed-csv history.csv
+  or ddrt_write_report_json()'s "windows" array exported to CSV.
+
+  Handles CSVs from different tool versions gracefully: columns are looked
+  up by name from the header row, so an older CSV missing outstanding_*/
+  bank_* columns just renders fewer panels instead of breaking. Handles both
+  tiny (unit-test scale) and huge (many-thousand-window) traces by
+  downsampling to a fixed number of display buckets when there are too many
+  rows to render legibly -- see aggregateForDisplay().
+-->
+<title>Windowed History Viewer</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --surface-2:      #f4f3f0;
+    --surface-3:      #eeece7;
+    --border:         #e3e1db;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #83817a;
+    --accent:         #2a78d6;
+    --series-1:       #2a78d6; /* blue -- bandwidth, hits */
+    --series-2:       #eb6834; /* orange -- conflicts */
+    --series-3:       #1baf7a; /* aqua -- empties, active-bank line */
+    --series-4:       #4a3aa7; /* violet -- outstanding line */
+    --grid:           #e3e1db;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --surface-2:      #232322;
+      --surface-3:      #2a2a28;
+      --border:         #38372f;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #8f8d82;
+      --accent:         #3987e5;
+      --series-1:       #3987e5;
+      --series-2:       #d95926;
+      --series-3:       #199e70;
+      --series-4:       #9085e9;
+      --grid:           #302f29;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --surface-2:      #232322;
+    --surface-3:      #2a2a28;
+    --border:         #38372f;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #8f8d82;
+    --accent:         #3987e5;
+    --series-1:       #3987e5;
+    --series-2:       #d95926;
+    --series-3:       #199e70;
+    --series-4:       #9085e9;
+    --grid:           #302f29;
+  }
+
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-1); }
+  .root {
+    background: var(--surface-1); color: var(--text-primary);
+    font: 13px/1.5 -apple-system, "Segoe UI", sans-serif;
+    padding: 22px 26px 30px; max-width: 1080px;
+  }
+  h1 { font-size: 16px; font-weight: 650; margin: 0 0 3px; }
+  .subtitle { color: var(--text-secondary); font-size: 12px; margin: 0 0 18px; max-width: 72ch; }
+
+  .load-row { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; flex-wrap: wrap; }
+  .drop-zone {
+    flex: 1; min-width: 260px; border: 1.5px dashed var(--border); border-radius: 8px;
+    padding: 12px 14px; color: var(--text-secondary); font-size: 12px;
+    display: flex; align-items: center; gap: 10px; cursor: pointer; background: var(--surface-2);
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .drop-zone:hover, .drop-zone.drag-over { border-color: var(--accent); background: var(--surface-3); }
+  .drop-zone input { display: none; }
+  .drop-zone .btn {
+    background: var(--accent); color: white; border: none; border-radius: 5px;
+    padding: 5px 12px; font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0;
+  }
+  #status-line { color: var(--text-muted); font-size: 11.5px; margin: 8px 0 20px; min-height: 15px; }
+  #status-line .example-tag {
+    color: var(--accent); font-weight: 600; background: var(--surface-2);
+    border-radius: 4px; padding: 1px 6px; margin-right: 6px;
+  }
+
+  .panel-label { fill: var(--text-secondary); font-size: 11px; font-weight: 600; }
+  .axis-label { fill: var(--text-muted); font-size: 10px; }
+  .axis-line { stroke: var(--border); stroke-width: 1; }
+  .grid-line { stroke: var(--grid); stroke-width: 1; }
+  .area-fill { opacity: 0.14; }
+  .line-mark { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .legend-text { fill: var(--text-secondary); font-size: 11px; }
+  .hover-x { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; opacity: 0; pointer-events: none; }
+  .hover-dot { fill: var(--surface-1); stroke-width: 2; opacity: 0; pointer-events: none; }
+  .empty-note { fill: var(--text-muted); font-size: 11px; font-style: italic; }
+
+  #tooltip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity 0.08s;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 11px; color: var(--text-primary); min-width: 188px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.14); z-index: 2;
+  }
+  #tooltip .tt-title { font-weight: 650; margin-bottom: 4px; }
+  #tooltip .tt-row { display: flex; justify-content: space-between; gap: 14px; color: var(--text-secondary); }
+  #tooltip .tt-row b { color: var(--text-primary); font-weight: 600; }
+  #chart-wrap { position: relative; }
+</style>
+
+<div class="root">
+  <h1>Windowed history viewer</h1>
+  <p class="subtitle">Drop in a CSV from <code>--windowed-csv</code> (or a "windows" array exported to CSV) to see bandwidth, row-status, outstanding-occupancy, and bank-utilization history. Runs entirely in this page — nothing is uploaded anywhere.</p>
+
+  <div class="load-row">
+    <label class="drop-zone" id="drop-zone">
+      <input type="file" id="file-input" accept=".csv,text/csv" />
+      <span>Drag a CSV here, or</span>
+      <span class="btn">Choose file</span>
+    </label>
+  </div>
+  <div id="status-line"></div>
+
+  <div id="chart-wrap">
+    <svg id="chart" viewBox="0 0 990 560" width="100%" style="display:block; overflow: visible;"></svg>
+    <div id="tooltip"></div>
+  </div>
+</div>
+
+<script>
+const EXAMPLE_CSV = `window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,hits,conflicts,empties,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,active_bank_count,bank_utilization_pct
+0,0,2176,0,2176,34,32,1,1,10.88,8,100,1,6.25
+1,200,1536,0,1536,24,24,0,0,7.68,8,100,1,6.25
+2,400,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+3,600,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+4,800,1792,0,1792,28,27,1,0,8.96,8,100,1,6.25
+5,1000,1536,0,1536,24,24,0,0,7.68,8,100,1,6.25
+6,1200,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+7,1400,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+8,1600,1664,0,1664,26,25,1,0,8.32,8,100,1,6.25
+9,1800,1664,0,1664,26,25,1,0,8.32,8,100,1,6.25
+10,2000,1536,0,1536,24,24,0,0,7.68,8,100,1,6.25
+11,2200,1152,0,1152,18,17,1,0,5.76,8,100,1,6.25
+12,2400,768,0,768,12,0,12,0,3.84,8,100,1,6.25
+13,2600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+14,2800,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+15,3000,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+16,3200,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+17,3400,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+18,3600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+19,3800,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+20,4000,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+21,4200,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+22,4400,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+23,4600,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+24,4800,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+25,5000,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+26,5200,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+27,5400,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+28,5600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+29,5800,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+30,6000,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+31,6200,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+32,6400,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+33,6600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+34,6800,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+35,7000,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+36,7200,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+37,7400,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+38,7600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+39,7800,64,0,64,1,0,1,0,0.32,8,100,1,6.25
+40,8000,64,0,64,1,0,1,0,0.32,8,100,1,6.25
+41,8200,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+42,8400,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+43,8600,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+44,8800,256,0,256,4,0,4,0,1.28,8,100,1,6.25
+45,9000,320,0,320,5,0,5,0,1.6,8,100,1,6.25
+46,9200,64,0,64,1,0,1,0,0.32,8,100,1,6.25
+47,9400,0,0,0,0,0,0,0,0,0,0,0,0
+48,9600,1856,0,1856,29,28,1,0,9.28,8,100,1,6.25
+49,9800,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+50,10000,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+51,10200,1728,0,1728,27,26,1,0,8.64,8,100,1,6.25
+52,10400,1600,0,1600,25,24,1,0,8,8,100,1,6.25
+53,10600,1536,0,1536,24,24,0,0,7.68,8,100,1,6.25
+54,10800,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+55,11000,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+56,11200,1792,0,1792,28,27,1,0,8.96,8,100,1,6.25
+57,11400,1536,0,1536,24,24,0,0,7.68,8,100,1,6.25
+58,11600,1536,0,1536,24,23,1,0,7.68,8,100,1,6.25
+59,11800,1472,0,1472,23,22,1,0,7.36,8,100,1,6.25
+`;
+
+const TARGET_BUCKETS = 150;
+
+function parseCsv(text) {
+  const lines = text.trim().split(/\r?\n/);
+  const header = lines[0].split(',').map(s => s.trim());
+  const idx = {};
+  header.forEach((name, i) => { idx[name] = i; });
+  const rows = lines.slice(1).filter(l => l.length > 0).map(line => {
+    const cells = line.split(',');
+    const get = (name, def = 0) => (idx[name] !== undefined && cells[idx[name]] !== undefined && cells[idx[name]] !== '')
+      ? parseFloat(cells[idx[name]]) : def;
+    return {
+      start_ns: get('start_ns'),
+      bytes_read: get('bytes_read'),
+      bytes_written: get('bytes_written'),
+      txn_count: get('txn_count'),
+      hits: get('hits'),
+      conflicts: get('conflicts'),
+      empties: get('empties'),
+      outstanding_high_water: idx['outstanding_high_water'] !== undefined ? get('outstanding_high_water') : null,
+      outstanding_occupancy_pct: idx['outstanding_occupancy_pct'] !== undefined ? get('outstanding_occupancy_pct') : null,
+      active_bank_count: idx['active_bank_count'] !== undefined ? get('active_bank_count') : null,
+      bank_utilization_pct: idx['bank_utilization_pct'] !== undefined ? get('bank_utilization_pct') : null,
+    };
+  });
+  return rows;
+}
+
+// Downsample to <= TARGET_BUCKETS by summing additive fields and taking the
+// max of "peak" fields (outstanding/bank) across each group of raw rows.
+function aggregateForDisplay(rows) {
+  if (rows.length <= TARGET_BUCKETS) return { buckets: rows, groupSize: 1 };
+  const groupSize = Math.ceil(rows.length / TARGET_BUCKETS);
+  const buckets = [];
+  const windowNs = rows.length > 1 ? (rows[1].start_ns - rows[0].start_ns) : 1;
+  for (let i = 0; i < rows.length; i += groupSize) {
+    const group = rows.slice(i, i + groupSize);
+    const b = { start_ns: group[0].start_ns, bytes_read: 0, bytes_written: 0, txn_count: 0, hits: 0, conflicts: 0, empties: 0,
+                outstanding_high_water: null, outstanding_occupancy_pct: null, active_bank_count: null, bank_utilization_pct: null };
+    let hasOutstanding = false, hasBank = false;
+    for (const r of group) {
+      b.bytes_read += r.bytes_read; b.bytes_written += r.bytes_written; b.txn_count += r.txn_count;
+      b.hits += r.hits; b.conflicts += r.conflicts; b.empties += r.empties;
+      if (r.outstanding_occupancy_pct !== null) { hasOutstanding = true; b.outstanding_occupancy_pct = Math.max(b.outstanding_occupancy_pct || 0, r.outstanding_occupancy_pct); b.outstanding_high_water = Math.max(b.outstanding_high_water || 0, r.outstanding_high_water); }
+      if (r.bank_utilization_pct !== null) { hasBank = true; b.bank_utilization_pct = Math.max(b.bank_utilization_pct || 0, r.bank_utilization_pct); b.active_bank_count = Math.max(b.active_bank_count || 0, r.active_bank_count); }
+    }
+    if (!hasOutstanding) { b.outstanding_occupancy_pct = null; b.outstanding_high_water = null; }
+    if (!hasBank) { b.bank_utilization_pct = null; b.active_bank_count = null; }
+    b.duration_ns = windowNs * group.length;
+    b.avg_bandwidth_gbps = b.duration_ns > 0 ? (b.bytes_read + b.bytes_written) / b.duration_ns : 0;
+    buckets.push(b);
+  }
+  return { buckets, groupSize };
+}
+
+const NS = 'http://www.w3.org/2000/svg';
+const el = (tag, attrs) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+const svg = document.getElementById('chart');
+const tooltip = document.getElementById('tooltip');
+const wrap = document.getElementById('chart-wrap');
+const statusLine = document.getElementById('status-line');
+
+function render(rows, sourceLabel) {
+  svg.innerHTML = '';
+  if (rows.length === 0) {
+    statusLine.textContent = 'No rows found in that file.';
+    return;
+  }
+  for (const r of rows) if (r.outstanding_occupancy_pct === undefined) r.outstanding_occupancy_pct = null;
+  const { buckets, groupSize } = aggregateForDisplay(rows.map(r => ({ ...r, avg_bandwidth_gbps: (r.bytes_read + r.bytes_written) })));
+  // recompute avg_bandwidth_gbps properly when not downsampled (groupSize 1: duration = per-row window)
+  const windowNs = rows.length > 1 ? (rows[1].start_ns - rows[0].start_ns) : (rows[0].duration_ns || 1);
+  if (groupSize === 1) buckets.forEach((b, i) => { b.avg_bandwidth_gbps = windowNs > 0 ? (b.bytes_read + b.bytes_written) / windowNs : 0; b.duration_ns = windowNs; });
+
+  statusLine.innerHTML = (sourceLabel === 'example' ? '<span class="example-tag">EXAMPLE DATA</span>' : '') +
+    `${rows.length.toLocaleString()} window${rows.length===1?'':'s'} loaded` +
+    (groupSize > 1 ? ` &rarr; downsampled to ${buckets.length} display buckets (${groupSize} raw windows/bucket)` : ' — shown at full resolution') +
+    (sourceLabel === 'example' ? ' — load your own CSV to replace this.' : '');
+
+  const hasOutstanding = buckets.some(b => b.outstanding_occupancy_pct !== null);
+  const hasBank = buckets.some(b => b.bank_utilization_pct !== null);
+
+  const marginL = 46, marginR = 16, plotW = 990 - marginL - marginR;
+  const gap = 32;
+  const bwH = 118, compH = 70, occH = hasOutstanding ? 62 : 0, bankH = hasBank ? 62 : 0;
+  let y = 16;
+  const bwTop = y; y += bwH; const axisY_bw = y; y += gap;
+  const compTop = y; y += compH; const axisY_comp = y; y += gap;
+  let occTop = 0, axisY_occ = 0, bankTop = 0, axisY_bank = 0;
+  if (hasOutstanding) { occTop = y; y += occH; axisY_occ = y; y += gap; }
+  if (hasBank) { bankTop = y; y += bankH; axisY_bank = y; y += gap; }
+  const totalH = y + 20;
+  svg.setAttribute('viewBox', `0 0 990 ${totalH}`);
+
+  const n = buckets.length;
+  const colW = plotW / n;
+  const xAt = i => marginL + i * colW + colW / 2;
+
+  // ---- panel 1: bandwidth ----
+  const maxBw = Math.max(0.001, ...buckets.map(b => b.avg_bandwidth_gbps)) * 1.15;
+  const yBw = v => bwTop + bwH - (v / maxBw) * bwH;
+  svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: bwTop - 4 })).textContent = 'Bandwidth (GB/s)';
+  [0, 0.5, 1].forEach(f => {
+    const yy = bwTop + bwH * (1 - f);
+    svg.appendChild(el('line', { class: 'grid-line', x1: marginL, x2: marginL + plotW, y1: yy, y2: yy }));
+    svg.appendChild(el('text', { class: 'axis-label', x: marginL - 6, y: yy + 3, 'text-anchor': 'end' })).textContent = (maxBw * f).toFixed(1);
+  });
+  let areaPath = `M ${xAt(0)} ${axisY_bw}`, linePath = `M ${xAt(0)} ${yBw(buckets[0].avg_bandwidth_gbps)}`;
+  buckets.forEach((b, i) => { areaPath += ` L ${xAt(i)} ${yBw(b.avg_bandwidth_gbps)}`; if (i > 0) linePath += ` L ${xAt(i)} ${yBw(b.avg_bandwidth_gbps)}`; });
+  areaPath += ` L ${xAt(n - 1)} ${axisY_bw} Z`;
+  svg.appendChild(el('path', { class: 'area-fill', d: areaPath, fill: 'var(--series-1)' }));
+  svg.appendChild(el('path', { class: 'line-mark', d: linePath, stroke: 'var(--series-1)' }));
+  svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_bw, y2: axisY_bw }));
+
+  // ---- panel 2: row-status stacked bars ----
+  svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: compTop - 4 })).textContent = 'Row status (transactions / window)';
+  const maxCount = Math.max(1, ...buckets.map(b => b.hits + b.conflicts + b.empties)) * 1.12;
+  [0, 0.5, 1].forEach(f => {
+    const yy = compTop + compH * (1 - f);
+    svg.appendChild(el('line', { class: 'grid-line', x1: marginL, x2: marginL + plotW, y1: yy, y2: yy }));
+  });
+  const barW = Math.max(1, colW - 1);
+  buckets.forEach((b, i) => {
+    const x = marginL + i * colW + (colW - barW) / 2;
+    let yCursor = axisY_comp;
+    const seg = (val, color) => {
+      if (val <= 0) return;
+      const h = (val / maxCount) * compH;
+      svg.appendChild(el('rect', { x, y: yCursor - h, width: barW, height: h, fill: color }));
+      yCursor -= h;
+    };
+    seg(b.hits, 'var(--series-1)'); seg(b.conflicts, 'var(--series-2)'); seg(b.empties, 'var(--series-3)');
+  });
+  svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_comp, y2: axisY_comp }));
+  let lx = marginL + plotW - 190;
+  [['Hit', 'var(--series-1)'], ['Conflict', 'var(--series-2)'], ['Empty', 'var(--series-3)']].forEach(([label, color]) => {
+    svg.appendChild(el('rect', { x: lx, y: compTop - 12, width: 9, height: 9, fill: color, rx: 2 }));
+    svg.appendChild(el('text', { class: 'legend-text', x: lx + 13, y: compTop - 4 })).textContent = label;
+    lx += 12 + label.length * 6 + 16;
+  });
+
+  // ---- panel 3: outstanding occupancy (optional) ----
+  if (hasOutstanding) {
+    svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: occTop - 4 })).textContent = 'Outstanding occupancy (% of cap)';
+    [0, 50, 100].forEach(v => {
+      const yy = occTop + occH * (1 - v / 100);
+      svg.appendChild(el('line', { class: 'grid-line', x1: marginL, x2: marginL + plotW, y1: yy, y2: yy }));
+      svg.appendChild(el('text', { class: 'axis-label', x: marginL - 6, y: yy + 3, 'text-anchor': 'end' })).textContent = v + '%';
+    });
+    let occLine = '';
+    buckets.forEach((b, i) => {
+      const v = b.outstanding_occupancy_pct || 0;
+      const yy = occTop + occH * (1 - Math.min(100, v) / 100);
+      occLine += (i === 0 ? 'M' : 'L') + ` ${xAt(i)} ${yy} `;
+    });
+    svg.appendChild(el('path', { class: 'line-mark', d: occLine, stroke: 'var(--series-4)' }));
+    svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_occ, y2: axisY_occ }));
+  }
+
+  // ---- panel 4: bank utilization (optional) ----
+  if (hasBank) {
+    svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: bankTop - 4 })).textContent = 'Bank utilization (% of banks active)';
+    [0, 50, 100].forEach(v => {
+      const yy = bankTop + bankH * (1 - v / 100);
+      svg.appendChild(el('line', { class: 'grid-line', x1: marginL, x2: marginL + plotW, y1: yy, y2: yy }));
+      svg.appendChild(el('text', { class: 'axis-label', x: marginL - 6, y: yy + 3, 'text-anchor': 'end' })).textContent = v + '%';
+    });
+    let bankLine = '';
+    buckets.forEach((b, i) => {
+      const v = b.bank_utilization_pct || 0;
+      const yy = bankTop + bankH * (1 - Math.min(100, v) / 100);
+      bankLine += (i === 0 ? 'M' : 'L') + ` ${xAt(i)} ${yy} `;
+    });
+    svg.appendChild(el('path', { class: 'line-mark', d: bankLine, stroke: 'var(--series-3)' }));
+    svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_bank, y2: axisY_bank }));
+  }
+
+  // ---- x-axis ticks ----
+  const bottomAxisY = hasBank ? axisY_bank : (hasOutstanding ? axisY_occ : axisY_comp);
+  const tickIdx = [0, Math.floor(n * 0.25), Math.floor(n * 0.5), Math.floor(n * 0.75), n - 1];
+  [...new Set(tickIdx)].forEach(i => {
+    svg.appendChild(el('text', { class: 'axis-label', x: xAt(i), y: bottomAxisY + 14, 'text-anchor': 'middle' })).textContent = fmtNs(buckets[i].start_ns);
+  });
+
+  // ---- shared hover ----
+  const hoverLine = el('line', { class: 'hover-x', x1: 0, x2: 0, y1: bwTop, y2: bottomAxisY });
+  svg.appendChild(hoverLine);
+  const dots = {
+    bw: el('circle', { class: 'hover-dot', r: 4, stroke: 'var(--series-1)' }),
+  };
+  svg.appendChild(dots.bw);
+  if (hasOutstanding) { dots.occ = el('circle', { class: 'hover-dot', r: 3.5, stroke: 'var(--series-4)' }); svg.appendChild(dots.occ); }
+  if (hasBank) { dots.bank = el('circle', { class: 'hover-dot', r: 3.5, stroke: 'var(--series-3)' }); svg.appendChild(dots.bank); }
+
+  const hitLayer = el('rect', { x: marginL, y: bwTop, width: plotW, height: bottomAxisY - bwTop, fill: 'transparent' });
+  svg.appendChild(hitLayer);
+
+  function showTooltip(i) {
+    const b = buckets[i];
+    hoverLine.setAttribute('x1', xAt(i)); hoverLine.setAttribute('x2', xAt(i)); hoverLine.style.opacity = 1;
+    dots.bw.setAttribute('cx', xAt(i)); dots.bw.setAttribute('cy', yBw(b.avg_bandwidth_gbps)); dots.bw.style.opacity = 1;
+    let rowsHtml = `<div class="tt-title">t = ${fmtNs(b.start_ns)}</div>` +
+      `<div class="tt-row"><span>Bandwidth</span><b>${b.avg_bandwidth_gbps.toFixed(2)} GB/s</b></div>` +
+      `<div class="tt-row"><span>Bytes (R/W)</span><b>${Math.round(b.bytes_read).toLocaleString()} / ${Math.round(b.bytes_written).toLocaleString()}</b></div>` +
+      `<div class="tt-row"><span>Hit/Conflict/Empty</span><b>${Math.round(b.hits)}/${Math.round(b.conflicts)}/${Math.round(b.empties)}</b></div>`;
+    if (hasOutstanding && b.outstanding_occupancy_pct !== null) {
+      const yy = occTop + occH * (1 - Math.min(100, b.outstanding_occupancy_pct) / 100);
+      dots.occ.setAttribute('cx', xAt(i)); dots.occ.setAttribute('cy', yy); dots.occ.style.opacity = 1;
+      rowsHtml += `<div class="tt-row"><span>Outstanding</span><b>${b.outstanding_occupancy_pct.toFixed(0)}% (${Math.round(b.outstanding_high_water)})</b></div>`;
+    }
+    if (hasBank && b.bank_utilization_pct !== null) {
+      const yy = bankTop + bankH * (1 - Math.min(100, b.bank_utilization_pct) / 100);
+      dots.bank.setAttribute('cx', xAt(i)); dots.bank.setAttribute('cy', yy); dots.bank.style.opacity = 1;
+      rowsHtml += `<div class="tt-row"><span>Active banks</span><b>${b.bank_utilization_pct.toFixed(0)}% (${Math.round(b.active_bank_count)})</b></div>`;
+    }
+    tooltip.innerHTML = rowsHtml;
+    const wrapRect = wrap.getBoundingClientRect();
+    const scale = wrapRect.width / 990;
+    let left = xAt(i) * scale + 14;
+    if (left + 210 > wrapRect.width) left = xAt(i) * scale - 210;
+    tooltip.style.left = left + 'px';
+    tooltip.style.top = (bwTop * scale) + 'px';
+    tooltip.style.opacity = 1;
+  }
+  function hideTooltip() {
+    hoverLine.style.opacity = 0;
+    Object.values(dots).forEach(d => d.style.opacity = 0);
+    tooltip.style.opacity = 0;
+  }
+  hitLayer.addEventListener('mousemove', (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const scale = 990 / rect.width;
+    const svgX = (ev.clientX - rect.left) * scale;
+    let i = Math.round((svgX - marginL - colW / 2) / colW);
+    i = Math.max(0, Math.min(n - 1, i));
+    showTooltip(i);
+  });
+  hitLayer.addEventListener('mouseleave', hideTooltip);
+}
+
+function fmtNs(ns) {
+  if (ns >= 1e6) return (ns / 1e6).toFixed(ns >= 1e7 ? 0 : 1) + ' ms';
+  if (ns >= 1e3) return (ns / 1e3).toFixed(1) + ' µs';
+  return Math.round(ns) + ' ns';
+}
+
+function loadCsvText(text, label) {
+  try {
+    const rows = parseCsv(text);
+    render(rows, label);
+  } catch (e) {
+    statusLine.textContent = 'Could not parse that CSV: ' + e.message;
+  }
+}
+
+const fileInput = document.getElementById('file-input');
+const dropZone = document.getElementById('drop-zone');
+fileInput.addEventListener('change', () => {
+  const file = fileInput.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadCsvText(reader.result, 'user');
+  reader.readAsText(file);
+});
+dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => loadCsvText(reader.result, 'user');
+  reader.readAsText(file);
+});
+
+loadCsvText(EXAMPLE_CSV, 'example');
+</script>

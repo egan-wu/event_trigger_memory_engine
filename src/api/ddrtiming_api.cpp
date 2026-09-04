@@ -1,5 +1,6 @@
 #include "ddrtiming/ddrtiming.h"
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -171,6 +172,41 @@ int ddrt_prune_results_before(ddrt_engine_t* engine, uint64_t max_txn_id) {
         engine->last_error = e.what();
         return -1;
     }
+}
+
+uint64_t ddrt_get_num_windows(ddrt_engine_t* engine) {
+    if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    return engine->engine->windows().size();
+}
+
+int ddrt_get_window_at(ddrt_engine_t* engine, uint64_t index, ddrt_window_stats_t* out) {
+    if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    const auto& windows = engine->engine->windows();
+    if (index >= windows.size()) return -1;
+    const ddrtiming::WindowStats& w = windows[index];
+    const ddrtiming::DdrcConfig& cfg = engine->engine->config();
+
+    out->window_index = index;
+    out->start_ns = static_cast<double>(index) * cfg.history_window_ns;
+    out->duration_ns = cfg.history_window_ns;
+    out->bytes_read = w.bytes_read;
+    out->bytes_written = w.bytes_written;
+    out->dram_bytes = w.dram_bytes;
+    out->txn_count = w.txn_count;
+    out->hits = w.hits;
+    out->conflicts = w.conflicts;
+    out->empties = w.empties;
+    out->avg_bandwidth_gbps = (out->duration_ns > 0.0)
+        ? static_cast<double>(w.bytes_read + w.bytes_written) / out->duration_ns
+        : 0.0;
+    out->outstanding_high_water = w.max_outstanding_count;
+    int max_out = std::max(1, cfg.max_outstanding_per_id);
+    out->outstanding_occupancy_pct = static_cast<double>(w.max_outstanding_count) / max_out * 100.0;
+    out->active_bank_count = w.active_banks.size();
+    out->bank_utilization_pct = static_cast<double>(w.active_banks.size()) / cfg.total_banks() * 100.0;
+    return 0;
 }
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {

@@ -256,3 +256,82 @@ DDRTEST(zero_sized_transaction_does_not_underflow_chunk_math) {
     DDR_CHECK(r[1].complete_cycle >= r[1].issue_cycle);
     DDR_CHECK_EQ(r[1].bytes, 64u); // ordinary transaction unaffected
 }
+
+DDRTEST(windowed_history_disabled_by_default) {
+    DdrcConfig cfg = make_test_config(); // history_window_ns defaults to 0
+    Engine engine(cfg);
+    engine.push_txn(make_read(0x000));
+    engine.run();
+    DDR_CHECK_EQ(engine.windows().size(), static_cast<size_t>(0));
+}
+
+DDRTEST(windowed_history_buckets_by_issue_cycle_and_survives_pruning) {
+    DdrcConfig cfg = make_test_config();
+    cfg.history_window_ns = 10.0; // == 10 cycles exactly (1 ns/cycle in this config)
+    Engine engine(cfg);
+
+    engine.push_txn(make_read(0x000)); // issue=0, Empty, complete=13 (hand-verified pattern)
+    engine.push_barrier(0);
+    engine.push_txn(make_read(0x040)); // gated to issue=13 by the barrier; same page -> Hit, complete=21
+
+    engine.run();
+
+    const auto& r = engine.results();
+    DDR_CHECK_EQ(r.size(), static_cast<size_t>(2));
+    DDR_CHECK_EQ(r[0].issue_cycle, 0ull);
+    DDR_CHECK_EQ(r[1].issue_cycle, 13ull);
+
+    const auto& w = engine.windows();
+    DDR_CHECK(w.size() >= 2); // window 0 (cycles 0-9) and window 1 (cycles 10-19)
+
+    DDR_CHECK_EQ(w[0].bytes_read, 64ull);
+    DDR_CHECK_EQ(w[0].txn_count, 1ull);
+    DDR_CHECK_EQ(w[0].empties, 1ull);
+    DDR_CHECK_EQ(w[0].hits, 0ull);
+
+    DDR_CHECK_EQ(w[1].bytes_read, 64ull);
+    DDR_CHECK_EQ(w[1].txn_count, 1ull);
+    DDR_CHECK_EQ(w[1].hits, 1ull);
+
+    size_t window_count_before_prune = w.size();
+    uint64_t max_id = 0;
+    for (const auto& res : engine.results()) max_id = std::max(max_id, res.txn_id);
+    engine.prune_results_before(max_id);
+
+    DDR_CHECK_EQ(engine.results().size(), static_cast<size_t>(0));
+    // Windows are tracked independently of results(), same as summary().
+    DDR_CHECK_EQ(engine.windows().size(), window_count_before_prune);
+    DDR_CHECK_EQ(engine.windows()[0].bytes_read, 64ull);
+    DDR_CHECK_EQ(engine.windows()[1].bytes_read, 64ull);
+}
+
+DDRTEST(windowed_history_tracks_outstanding_high_water_and_active_banks) {
+    DdrcConfig cfg = make_test_config();
+    cfg.bankgroups = 2;
+    cfg.banks_per_group = 2; // total_banks = 1 channel * 1 rank * 2 bg * 2 banks = 4
+    cfg.map_bank = AddressField::contiguous(10, 1);
+    cfg.map_bankgroup = AddressField::contiguous(11, 1);
+    cfg.map_row = AddressField::contiguous(12, 10);
+    cfg.history_window_ns = 100000.0; // huge -- everything below lands in window 0
+    cfg.max_outstanding_per_id = 2;
+    DDR_CHECK_EQ(cfg.total_banks(), 4);
+    Engine engine(cfg);
+
+    // Three distinct (bank, bankgroup) combinations: (0,0), (1,0), (0,1).
+    engine.push_txn(make_read(0x000, /*axi_id=*/9));
+    engine.push_txn(make_read(0x400, /*axi_id=*/9)); // bit10 set -> bank 1, same bankgroup
+    engine.push_txn(make_read(0x800, /*axi_id=*/9)); // bit11 set -> bank 0, other bankgroup
+
+    // A separate id pushed 3x with cap=2: the 3rd must wait for one of the
+    // first two to complete, so occupancy should peak at exactly the cap.
+    engine.push_txn(make_read(0x1000, /*axi_id=*/5));
+    engine.push_txn(make_read(0x1040, /*axi_id=*/5));
+    engine.push_txn(make_read(0x1080, /*axi_id=*/5));
+
+    engine.run();
+
+    DDR_CHECK(engine.windows().size() >= 1);
+    const WindowStats& w = engine.windows()[0];
+    DDR_CHECK_EQ(w.active_banks.size(), static_cast<size_t>(3));
+    DDR_CHECK_EQ(w.max_outstanding_count, 2ull);
+}

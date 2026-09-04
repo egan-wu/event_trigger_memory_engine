@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -75,6 +76,13 @@ struct DdrcConfig {
     int max_outstanding_per_id = 16;
     std::string scheduling_policy = "fr_fcfs"; // "fr_fcfs" | "in_order"
 
+    // reporting: bucket dispatched transactions into fixed-size windows of
+    // simulated time (by issue_cycle) for a bandwidth/byte-access history,
+    // independent of when/how often the caller happens to call run() and
+    // unaffected by prune_results_before() -- see README "Windowed history".
+    // 0 (default) disables windowed accounting entirely.
+    double history_window_ns = 0.0;
+
     double clock_period_ns() const { return 1000.0 / clock_mhz; }
     uint64_t ns_to_cycles(double ns) const {
         double c = ns / clock_period_ns();
@@ -84,6 +92,9 @@ struct DdrcConfig {
     double peak_bandwidth_gbps() const {
         // bytes/cycle * cycles/ns = bytes/ns == GB/s, times number of channels
         return static_cast<double>(data_bus_bytes) / clock_period_ns() * channels;
+    }
+    int total_banks() const {
+        return std::max(1, channels) * std::max(1, ranks_per_channel) * std::max(1, bankgroups) * std::max(1, banks_per_group);
     }
 
     static DdrcConfig load_from_file(const std::string& path);

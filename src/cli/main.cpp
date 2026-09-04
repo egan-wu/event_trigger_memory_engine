@@ -11,8 +11,9 @@
 namespace {
 void print_usage() {
     std::cout << "Usage: ddrtiming_cli --config <ddrc_config.json> --log <core0_axi.csv> "
-                 "[--log <core1_axi.csv> ...] [--out <report.json>]\n"
-                 "Each --log is assigned core_id = its position (0, 1, 2, ...).\n";
+                 "[--log <core1_axi.csv> ...] [--out <report.json>] [--windowed-csv <history.csv>]\n"
+                 "Each --log is assigned core_id = its position (0, 1, 2, ...).\n"
+                 "--windowed-csv requires \"reporting\": {\"history_window_ns\": N} in the config.\n";
 }
 } // namespace
 
@@ -20,6 +21,7 @@ int main(int argc, char** argv) {
     std::string config_path;
     std::vector<std::string> log_paths;
     std::string out_path;
+    std::string windowed_csv_path;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -33,6 +35,7 @@ int main(int argc, char** argv) {
         if (arg == "--config") config_path = need_value("--config");
         else if (arg == "--log") log_paths.push_back(need_value("--log"));
         else if (arg == "--out") out_path = need_value("--out");
+        else if (arg == "--windowed-csv") windowed_csv_path = need_value("--windowed-csv");
         else if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
         else { std::cerr << "unknown argument: " << arg << "\n"; print_usage(); return 1; }
     }
@@ -65,6 +68,10 @@ int main(int argc, char** argv) {
         if (!out_path.empty()) {
             ddrtiming::write_report_json(engine, out_path);
             std::cout << "\nJSON report written to " << out_path << "\n";
+        }
+        if (!windowed_csv_path.empty()) {
+            ddrtiming::write_windowed_csv(engine, windowed_csv_path);
+            std::cout << "Windowed history CSV written to " << windowed_csv_path << "\n";
         }
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";

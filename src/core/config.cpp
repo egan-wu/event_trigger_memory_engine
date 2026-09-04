@@ -78,6 +78,11 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.scheduling_policy = r.get_str("scheduling_policy", cfg.scheduling_policy);
     }
 
+    if (root.contains("reporting")) {
+        const json::Value& rp = root["reporting"];
+        cfg.history_window_ns = rp.get_num("history_window_ns", cfg.history_window_ns);
+    }
+
     return cfg;
 }
 

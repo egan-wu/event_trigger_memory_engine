@@ -31,5 +31,9 @@
     "command_queue_depth": 32,
     "max_outstanding_per_id": 8,
     "scheduling_policy": "fr_fcfs"
+  },
+
+  "reporting": {
+    "history_window_ns": 50.0
   }
 }
