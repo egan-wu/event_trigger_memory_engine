@@ -305,6 +305,58 @@ on-screen (`"downsampled to N display buckets"`) rather than silently
 reducing resolution. Nothing is uploaded anywhere; it's pure client-side
 JS/SVG.
 
+### Analyzing it: `tools/windowed_history_analyze`
+
+The viewer above is for a human looking at a chart. `windowed_history_analyze`
+is the same data for a caller that can't look at one — an AI agent, a CI gate,
+a script piping into `jq` — anything that needs to *reason about* a trace
+without eyeballing it. It's a separate standalone executable (built as part of
+this project, not linked into `libddrtiming`): reads a `--windowed-csv` file
+alone, no config or engine state needed, and prints structured JSON findings.
+
+```
+windowed_history_analyze --csv history.csv [--out findings.json]
+```
+
+Output shape:
+
+```json
+{
+  "summary": {
+    "num_windows": 141, "num_channels": 2, "total_bytes": 123456789,
+    "avg_bandwidth_gbps": 7.61, "avg_outstanding_occupancy_pct": 100.0,
+    "avg_bank_utilization_pct": 3.15, "hit_rate_pct": 96.9, "conflict_rate_pct": 1.2
+  },
+  "findings": [
+    {
+      "type": "channel_imbalance", "severity": "warning",
+      "window_start": 0, "window_end": 140, "start_ns": 0, "end_ns": 42000,
+      "detail": "channel 1 averaged 0 GB/s while channel 0 averaged 15.2 GB/s ..."
+    }
+  ]
+}
+```
+
+Like the viewer, it degrades gracefully on an older CSV missing newer columns
+(outstanding/bank/per-channel) — it just skips the rules that need them and
+omits the corresponding `summary` fields, rather than failing. Four rules run
+today, each a distinct saturation signal (see the field descriptions above —
+this tool is the same four dimensions, turned into pass/fail checks instead
+of a chart to read):
+
+| `type` | Fires when | `severity` |
+|---|---|---|
+| `channel_imbalance` | `num_channels >= 2` and, for >= 2 consecutive windows, the quietest channel is under 30% of the busiest (and the busiest isn't 0) | warning |
+| `outstanding_saturated` | `outstanding_occupancy_pct >= 90%` in at least half the trace's windows — `max_outstanding_per_id`, not DRAM timing, is the likely limiter | warning |
+| `bank_underutilized` | trace-average `bank_utilization_pct < 25%` — traffic isn't spread across available banks | info |
+| `bandwidth_drop` | for >= 3 consecutive windows, bandwidth is under 40% of the trace's own median (detail includes the row-conflict rate for that range, since a high conflict rate there is usually the explanation) | warning |
+
+Findings are self-contained on purpose: `window_start`/`window_end` plus
+`start_ns`/`end_ns` pin down exactly where, and `detail` states the concrete
+numbers behind the finding, so a caller can act on the JSON alone. An empty
+`findings` array is a meaningful, valid result (the trace looked healthy by
+these rules), not an error.
+
 ## Feeding it from a long-running DMA model (no "end of log")
 
 `run()` is safe to call repeatedly and is cheap when there's nothing new: each

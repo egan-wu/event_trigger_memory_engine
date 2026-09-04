@@ -34,6 +34,9 @@ target_link_libraries(ddrtiming_cli PRIVATE ddrtiming)
 add_executable(daemon_demo examples/daemon_demo.c)
 target_link_libraries(daemon_demo PRIVATE ddrtiming)
 
+add_executable(windowed_history_analyze tools/windowed_history_analyze.cpp)
+target_link_libraries(windowed_history_analyze PRIVATE ddrtiming)
+
 enable_testing()
 add_executable(ddrtiming_tests
     tests/test_main.cpp
@@ -47,3 +50,8 @@ target_include_directories(ddrtiming_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/s
 find_package(Threads REQUIRED)
 target_link_libraries(ddrtiming_tests PRIVATE ddrtiming Threads::Threads)
 add_test(NAME ddrtiming_tests COMMAND ddrtiming_tests)
+
+add_test(NAME windowed_history_analyze_smoke
+         COMMAND windowed_history_analyze --csv ${CMAKE_CURRENT_SOURCE_DIR}/examples/windowed_history_imbalance.example.csv)
+set_tests_properties(windowed_history_analyze_smoke PROPERTIES
+    PASS_REGULAR_EXPRESSION "channel_imbalance")
