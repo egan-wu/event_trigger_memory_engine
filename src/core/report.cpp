@@ -87,6 +87,24 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
             wv.set("outstanding_occupancy_pct", static_cast<double>(w.max_outstanding_count) / max_out * 100.0);
             wv.set("active_bank_count", static_cast<int64_t>(w.active_banks.size()));
             wv.set("bank_utilization_pct", static_cast<double>(w.active_banks.size()) / engine.config().total_banks() * 100.0);
+
+            // Per-channel breakdown -- the aggregate dram_bytes/avg_bandwidth_gbps
+            // above can't distinguish "every channel at 50%" from "one channel
+            // maxed, one idle"; both sum to the same aggregate number.
+            double peak_per_channel = engine.config().peak_bandwidth_per_channel_gbps();
+            json::Value channels = json::Value::make_array();
+            int nchannels = std::max(1, engine.config().channels);
+            for (int ch = 0; ch < nchannels; ++ch) {
+                uint64_t ch_bytes = (static_cast<size_t>(ch) < w.dram_bytes_per_channel.size()) ? w.dram_bytes_per_channel[ch] : 0;
+                double ch_bw = window_ns > 0.0 ? static_cast<double>(ch_bytes) / window_ns : 0.0;
+                json::Value cv = json::Value::make_object();
+                cv.set("dram_bytes", static_cast<int64_t>(ch_bytes));
+                cv.set("avg_bandwidth_gbps", ch_bw);
+                cv.set("utilization_pct", peak_per_channel > 0.0 ? ch_bw / peak_per_channel * 100.0 : 0.0);
+                channels.push_back(std::move(cv));
+            }
+            wv.set("channels", std::move(channels));
+
             windows.push_back(std::move(wv));
         }
         root.set("windows", std::move(windows));
@@ -131,10 +149,16 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
 
     int max_out = std::max(1, engine.config().max_outstanding_per_id);
     int total_banks = engine.config().total_banks();
+    int nchannels = std::max(1, engine.config().channels);
 
     f << "window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,"
          "hits,conflicts,empties,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,"
-         "active_bank_count,bank_utilization_pct\n";
+         "active_bank_count,bank_utilization_pct";
+    // Per-channel columns -- lets a viewer distinguish "every channel at 50%"
+    // from "one channel maxed, one idle", both invisible in the aggregate above.
+    for (int ch = 0; ch < nchannels; ++ch) f << ",ch" << ch << "_dram_bytes,ch" << ch << "_avg_bandwidth_gbps";
+    f << '\n';
+
     for (size_t i = 0; i < engine.windows().size(); ++i) {
         const WindowStats& w = engine.windows()[i];
         double start_ns = static_cast<double>(i) * window_ns;
@@ -145,7 +169,13 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
         f << i << ',' << start_ns << ',' << w.bytes_read << ',' << w.bytes_written << ','
           << w.dram_bytes << ',' << w.txn_count << ',' << w.hits << ',' << w.conflicts << ','
           << w.empties << ',' << bw << ',' << w.max_outstanding_count << ',' << occ_pct << ','
-          << active_banks << ',' << bank_util_pct << '\n';
+          << active_banks << ',' << bank_util_pct;
+        for (int ch = 0; ch < nchannels; ++ch) {
+            uint64_t ch_bytes = (static_cast<size_t>(ch) < w.dram_bytes_per_channel.size()) ? w.dram_bytes_per_channel[ch] : 0;
+            double ch_bw = window_ns > 0.0 ? static_cast<double>(ch_bytes) / window_ns : 0.0;
+            f << ',' << ch_bytes << ',' << ch_bw;
+        }
+        f << '\n';
     }
 }
 

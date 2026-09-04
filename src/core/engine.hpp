@@ -64,6 +64,13 @@ struct WindowStats {
     // hitting a handful of banks (an address-mapping spread problem, not a
     // timing one).
     std::set<uint64_t> active_banks;
+    // Physical (DRAM-side, full-burst) bytes dispatched to each channel in
+    // this window, indexed by channel number and grown lazily -- so imbalance
+    // across channels is visible even when it's invisible in the aggregate:
+    // "50% overall utilization" is a completely different situation if it's
+    // 2 channels at 25% each versus one at 100% and one idle, and dram_bytes
+    // above (summed across channels) can't tell those apart.
+    std::vector<uint64_t> dram_bytes_per_channel;
 };
 
 // One independent dispatch stream per (core_id, segment, axi_id): AXI

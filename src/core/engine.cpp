@@ -196,6 +196,9 @@ void Engine::run() {
                                           static_cast<uint64_t>(std::max(1, cfg_.bankgroups)) + bg_idx) *
                                          static_cast<uint64_t>(std::max(1, cfg_.banks_per_group)) + bank_idx;
                 w->active_banks.insert(bank_key);
+
+                if (w->dram_bytes_per_channel.size() <= ch) w->dram_bytes_per_channel.resize(ch + 1, 0);
+                w->dram_bytes_per_channel[ch] += cmd.bytes;
             }
         }
 

@@ -24,10 +24,14 @@
     --text-secondary: #52514e;
     --text-muted:     #83817a;
     --accent:         #2a78d6;
-    --series-1:       #2a78d6; /* blue -- bandwidth, hits */
-    --series-2:       #eb6834; /* orange -- conflicts */
-    --series-3:       #1baf7a; /* aqua -- empties, active-bank line */
-    --series-4:       #4a3aa7; /* violet -- outstanding line */
+    --series-1:       #2a78d6; /* blue -- bandwidth, hits, channel 0 */
+    --series-2:       #eb6834; /* orange -- conflicts, channel 1 */
+    --series-3:       #1baf7a; /* aqua -- empties, active-bank line, channel 2 */
+    --series-4:       #4a3aa7; /* violet -- outstanding line, channel 6 */
+    --series-5:       #eda100; /* yellow -- channel 3 */
+    --series-6:       #e87ba4; /* magenta -- channel 4 */
+    --series-7:       #008300; /* green -- channel 5 */
+    --series-8:       #e34948; /* red -- channel 7 */
     --grid:           #e3e1db;
   }
   @media (prefers-color-scheme: dark) {
@@ -45,6 +49,10 @@
       --series-2:       #d95926;
       --series-3:       #199e70;
       --series-4:       #9085e9;
+      --series-5:       #c98500;
+      --series-6:       #d55181;
+      --series-7:       #008300;
+      --series-8:       #e66767;
       --grid:           #302f29;
     }
   }
@@ -62,6 +70,10 @@
     --series-2:       #d95926;
     --series-3:       #199e70;
     --series-4:       #9085e9;
+    --series-5:       #c98500;
+    --series-6:       #d55181;
+    --series-7:       #008300;
+    --series-8:       #e66767;
     --grid:           #302f29;
   }
 
@@ -202,15 +214,23 @@ const EXAMPLE_CSV = `window_index,start_ns,bytes_read,bytes_written,dram_bytes,t
 
 const TARGET_BUCKETS = 150;
 
+function detectChannelCount(idx) {
+  let n = 0;
+  while (idx[`ch${n}_dram_bytes`] !== undefined) n++;
+  return n;
+}
+
 function parseCsv(text) {
   const lines = text.trim().split(/\r?\n/);
   const header = lines[0].split(',').map(s => s.trim());
   const idx = {};
   header.forEach((name, i) => { idx[name] = i; });
+  const numChannels = detectChannelCount(idx);
   const rows = lines.slice(1).filter(l => l.length > 0).map(line => {
     const cells = line.split(',');
     const get = (name, def = 0) => (idx[name] !== undefined && cells[idx[name]] !== undefined && cells[idx[name]] !== '')
       ? parseFloat(cells[idx[name]]) : def;
+    const channel_bytes = numChannels > 0 ? Array.from({ length: numChannels }, (_, c) => get(`ch${c}_dram_bytes`)) : null;
     return {
       start_ns: get('start_ns'),
       bytes_read: get('bytes_read'),
@@ -223,6 +243,7 @@ function parseCsv(text) {
       outstanding_occupancy_pct: idx['outstanding_occupancy_pct'] !== undefined ? get('outstanding_occupancy_pct') : null,
       active_bank_count: idx['active_bank_count'] !== undefined ? get('active_bank_count') : null,
       bank_utilization_pct: idx['bank_utilization_pct'] !== undefined ? get('bank_utilization_pct') : null,
+      channel_bytes,
     };
   });
   return rows;
@@ -235,16 +256,19 @@ function aggregateForDisplay(rows) {
   const groupSize = Math.ceil(rows.length / TARGET_BUCKETS);
   const buckets = [];
   const windowNs = rows.length > 1 ? (rows[1].start_ns - rows[0].start_ns) : 1;
+  const numChannels = (rows[0].channel_bytes || []).length;
   for (let i = 0; i < rows.length; i += groupSize) {
     const group = rows.slice(i, i + groupSize);
     const b = { start_ns: group[0].start_ns, bytes_read: 0, bytes_written: 0, txn_count: 0, hits: 0, conflicts: 0, empties: 0,
-                outstanding_high_water: null, outstanding_occupancy_pct: null, active_bank_count: null, bank_utilization_pct: null };
+                outstanding_high_water: null, outstanding_occupancy_pct: null, active_bank_count: null, bank_utilization_pct: null,
+                channel_bytes: numChannels > 0 ? new Array(numChannels).fill(0) : null };
     let hasOutstanding = false, hasBank = false;
     for (const r of group) {
       b.bytes_read += r.bytes_read; b.bytes_written += r.bytes_written; b.txn_count += r.txn_count;
       b.hits += r.hits; b.conflicts += r.conflicts; b.empties += r.empties;
       if (r.outstanding_occupancy_pct !== null) { hasOutstanding = true; b.outstanding_occupancy_pct = Math.max(b.outstanding_occupancy_pct || 0, r.outstanding_occupancy_pct); b.outstanding_high_water = Math.max(b.outstanding_high_water || 0, r.outstanding_high_water); }
       if (r.bank_utilization_pct !== null) { hasBank = true; b.bank_utilization_pct = Math.max(b.bank_utilization_pct || 0, r.bank_utilization_pct); b.active_bank_count = Math.max(b.active_bank_count || 0, r.active_bank_count); }
+      if (b.channel_bytes && r.channel_bytes) for (let c = 0; c < numChannels; c++) b.channel_bytes[c] += r.channel_bytes[c] || 0;
     }
     if (!hasOutstanding) { b.outstanding_occupancy_pct = null; b.outstanding_high_water = null; }
     if (!hasBank) { b.bank_utilization_pct = null; b.active_bank_count = null; }
@@ -281,18 +305,28 @@ function render(rows, sourceLabel) {
 
   const hasOutstanding = buckets.some(b => b.outstanding_occupancy_pct !== null);
   const hasBank = buckets.some(b => b.bank_utilization_pct !== null);
+  const numChannels = (buckets.find(b => b.channel_bytes) || {}).channel_bytes?.length || 0;
+  const hasChannels = numChannels > 1; // a single channel has nothing to compare against itself
 
   const marginL = 46, marginR = 16, plotW = 990 - marginL - marginR;
   const gap = 32;
-  const bwH = 118, compH = 70, occH = hasOutstanding ? 62 : 0, bankH = hasBank ? 62 : 0;
+  const bwH = 118, chH = hasChannels ? 90 : 0, compH = 70, occH = hasOutstanding ? 62 : 0, bankH = hasBank ? 62 : 0;
   let y = 16;
   const bwTop = y; y += bwH; const axisY_bw = y; y += gap;
+  let chTop = 0, axisY_ch = 0;
+  if (hasChannels) { chTop = y; y += chH; axisY_ch = y; y += gap; }
   const compTop = y; y += compH; const axisY_comp = y; y += gap;
   let occTop = 0, axisY_occ = 0, bankTop = 0, axisY_bank = 0;
   if (hasOutstanding) { occTop = y; y += occH; axisY_occ = y; y += gap; }
   if (hasBank) { bankTop = y; y += bankH; axisY_bank = y; y += gap; }
   const totalH = y + 20;
   svg.setAttribute('viewBox', `0 0 990 ${totalH}`);
+  const channelColors = ['var(--series-1)', 'var(--series-2)', 'var(--series-3)', 'var(--series-5)', 'var(--series-6)', 'var(--series-7)', 'var(--series-4)', 'var(--series-8)'];
+  const chBw = (b, c) => (b.duration_ns > 0 && b.channel_bytes) ? (b.channel_bytes[c] || 0) / b.duration_ns : 0;
+  const maxChBw = hasChannels
+    ? Math.max(0.001, ...buckets.flatMap(b => Array.from({ length: numChannels }, (_, c) => chBw(b, c)))) * 1.15
+    : 1;
+  const yCh = v => chTop + chH - (v / maxChBw) * chH;
 
   const n = buckets.length;
   const colW = plotW / n;
@@ -313,6 +347,33 @@ function render(rows, sourceLabel) {
   svg.appendChild(el('path', { class: 'area-fill', d: areaPath, fill: 'var(--series-1)' }));
   svg.appendChild(el('path', { class: 'line-mark', d: linePath, stroke: 'var(--series-1)' }));
   svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_bw, y2: axisY_bw }));
+
+  // ---- panel: per-channel bandwidth (only if >1 channel) ----
+  // The whole reason this exists: the aggregate panel above sums across
+  // every channel, so "50% overall" looks identical whether it's every
+  // channel at 50% or one maxed and the rest idle. This panel is what tells
+  // them apart.
+  if (hasChannels) {
+    svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: chTop - 4 })).textContent = `Per-channel bandwidth (GB/s, ${numChannels} channels)`;
+    [0, 0.5, 1].forEach(f => {
+      const yy = chTop + chH * (1 - f);
+      svg.appendChild(el('line', { class: 'grid-line', x1: marginL, x2: marginL + plotW, y1: yy, y2: yy }));
+      svg.appendChild(el('text', { class: 'axis-label', x: marginL - 6, y: yy + 3, 'text-anchor': 'end' })).textContent = (maxChBw * f).toFixed(1);
+    });
+    for (let c = 0; c < numChannels; c++) {
+      let path = '';
+      buckets.forEach((b, i) => { path += (i === 0 ? 'M' : 'L') + ` ${xAt(i)} ${yCh(chBw(b, c))} `; });
+      svg.appendChild(el('path', { class: 'line-mark', d: path, stroke: channelColors[c % channelColors.length] }));
+    }
+    svg.appendChild(el('line', { class: 'axis-line', x1: marginL, x2: marginL + plotW, y1: axisY_ch, y2: axisY_ch }));
+    let chlx = marginL + plotW - numChannels * 62;
+    for (let c = 0; c < numChannels; c++) {
+      const color = channelColors[c % channelColors.length];
+      svg.appendChild(el('rect', { x: chlx, y: chTop - 12, width: 9, height: 9, fill: color, rx: 2 }));
+      svg.appendChild(el('text', { class: 'legend-text', x: chlx + 13, y: chTop - 4 })).textContent = `ch${c}`;
+      chlx += 62;
+    }
+  }
 
   // ---- panel 2: row-status stacked bars ----
   svg.appendChild(el('text', { class: 'panel-label', x: marginL, y: compTop - 4 })).textContent = 'Row status (transactions / window)';
@@ -393,6 +454,14 @@ function render(rows, sourceLabel) {
   svg.appendChild(dots.bw);
   if (hasOutstanding) { dots.occ = el('circle', { class: 'hover-dot', r: 3.5, stroke: 'var(--series-4)' }); svg.appendChild(dots.occ); }
   if (hasBank) { dots.bank = el('circle', { class: 'hover-dot', r: 3.5, stroke: 'var(--series-3)' }); svg.appendChild(dots.bank); }
+  const chDots = [];
+  if (hasChannels) {
+    for (let c = 0; c < numChannels; c++) {
+      const d = el('circle', { class: 'hover-dot', r: 3, stroke: channelColors[c % channelColors.length] });
+      chDots.push(d);
+      svg.appendChild(d);
+    }
+  }
 
   const hitLayer = el('rect', { x: marginL, y: bwTop, width: plotW, height: bottomAxisY - bwTop, fill: 'transparent' });
   svg.appendChild(hitLayer);
@@ -415,6 +484,13 @@ function render(rows, sourceLabel) {
       dots.bank.setAttribute('cx', xAt(i)); dots.bank.setAttribute('cy', yy); dots.bank.style.opacity = 1;
       rowsHtml += `<div class="tt-row"><span>Active banks</span><b>${b.bank_utilization_pct.toFixed(0)}% (${Math.round(b.active_bank_count)})</b></div>`;
     }
+    if (hasChannels) {
+      for (let c = 0; c < numChannels; c++) {
+        const v = chBw(b, c);
+        chDots[c].setAttribute('cx', xAt(i)); chDots[c].setAttribute('cy', yCh(v)); chDots[c].style.opacity = 1;
+        rowsHtml += `<div class="tt-row"><span>ch${c} bandwidth</span><b>${v.toFixed(2)} GB/s</b></div>`;
+      }
+    }
     tooltip.innerHTML = rowsHtml;
     const wrapRect = wrap.getBoundingClientRect();
     const scale = wrapRect.width / 990;
@@ -427,6 +503,7 @@ function render(rows, sourceLabel) {
   function hideTooltip() {
     hoverLine.style.opacity = 0;
     Object.values(dots).forEach(d => d.style.opacity = 0);
+    chDots.forEach(d => d.style.opacity = 0);
     tooltip.style.opacity = 0;
   }
   hitLayer.addEventListener('mousemove', (ev) => {

@@ -335,3 +335,29 @@ DDRTEST(windowed_history_tracks_outstanding_high_water_and_active_banks) {
     DDR_CHECK_EQ(w.active_banks.size(), static_cast<size_t>(3));
     DDR_CHECK_EQ(w.max_outstanding_count, 2ull);
 }
+
+DDRTEST(windowed_history_reveals_channel_imbalance_invisible_in_aggregate) {
+    // The whole point: 2 channels, all traffic on channel 0, channel 1 idle.
+    // The aggregate avg_bandwidth_gbps alone can't distinguish this from an
+    // evenly split load -- the per-channel breakdown must.
+    DdrcConfig cfg = make_test_config();
+    cfg.channels = 2;
+    cfg.map_channel = AddressField::contiguous(24, 1); // bit24 selects channel
+    cfg.history_window_ns = 100000.0; // huge -- everything lands in window 0
+    Engine engine(cfg);
+
+    // All on channel 0 (bit24 clear).
+    for (int i = 0; i < 4; ++i) {
+        engine.push_txn(make_read(static_cast<uint64_t>(i) * 0x40, /*axi_id=*/static_cast<uint32_t>(i + 1)));
+    }
+    engine.run();
+
+    DDR_CHECK(engine.windows().size() >= 1);
+    const WindowStats& w = engine.windows()[0];
+    DDR_CHECK(w.dram_bytes_per_channel.size() >= 1);
+    DDR_CHECK(w.dram_bytes_per_channel[0] > 0);
+    // Channel 1 either wasn't touched at all (vector too short) or is exactly 0.
+    bool channel1_idle = (w.dram_bytes_per_channel.size() < 2) || (w.dram_bytes_per_channel[1] == 0);
+    DDR_CHECK(channel1_idle);
+    DDR_CHECK_EQ(w.dram_bytes_per_channel[0], w.dram_bytes); // channel 0 alone accounts for the whole aggregate
+}

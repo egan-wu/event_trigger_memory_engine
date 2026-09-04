@@ -94,6 +94,16 @@ typedef struct {
     double bank_utilization_pct; /* active_bank_count / total_banks * 100 */
 } ddrt_window_stats_t;
 
+/* Per-channel breakdown for one window -- see ddrt_get_window_channel_stats().
+ * Exists because the aggregate ddrt_window_stats_t above can't distinguish
+ * "every channel at 50%" from "one channel at 100%, one idle": both sum to
+ * the same overall bandwidth_utilization_pct. */
+typedef struct {
+    uint64_t dram_bytes;      /* physical bytes this channel moved in the window */
+    double avg_bandwidth_gbps;
+    double utilization_pct;   /* vs this channel's own peak (data_bus_bytes*clock_mhz/1000) */
+} ddrt_channel_window_stats_t;
+
 /* Create an engine from a DDRC JSON config file. Returns NULL on failure. */
 ddrt_engine_t* ddrt_create(const char* config_json_path);
 
@@ -135,6 +145,16 @@ int ddrt_prune_results_before(ddrt_engine_t* engine, uint64_t max_txn_id);
  * Windows never shrink and are unaffected by ddrt_prune_results_before(). */
 uint64_t ddrt_get_num_windows(ddrt_engine_t* engine);
 int ddrt_get_window_at(ddrt_engine_t* engine, uint64_t index, ddrt_window_stats_t* out);
+
+/* topology.channels -- for iterating ddrt_get_window_channel_stats(). */
+uint64_t ddrt_get_num_channels(ddrt_engine_t* engine);
+
+/* Per-channel breakdown for one window/channel pair -- see
+ * ddrt_channel_window_stats_t above for why this exists alongside the
+ * aggregate ddrt_get_window_at(). Returns 0 windows of data (all zero) for
+ * a channel that had no traffic in that window, same as the aggregate. */
+int ddrt_get_window_channel_stats(ddrt_engine_t* engine, uint64_t window_index,
+                                   uint64_t channel_index, ddrt_channel_window_stats_t* out);
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path);
 

@@ -209,6 +209,32 @@ int ddrt_get_window_at(ddrt_engine_t* engine, uint64_t index, ddrt_window_stats_
     return 0;
 }
 
+uint64_t ddrt_get_num_channels(ddrt_engine_t* engine) {
+    if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    return static_cast<uint64_t>(std::max(1, engine->engine->config().channels));
+}
+
+int ddrt_get_window_channel_stats(ddrt_engine_t* engine, uint64_t window_index,
+                                   uint64_t channel_index, ddrt_channel_window_stats_t* out) {
+    if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    const auto& windows = engine->engine->windows();
+    if (window_index >= windows.size()) return -1;
+    const ddrtiming::DdrcConfig& cfg = engine->engine->config();
+    if (channel_index >= static_cast<uint64_t>(std::max(1, cfg.channels))) return -1;
+
+    const ddrtiming::WindowStats& w = windows[window_index];
+    uint64_t bytes = (channel_index < w.dram_bytes_per_channel.size()) ? w.dram_bytes_per_channel[channel_index] : 0;
+
+    out->dram_bytes = bytes;
+    double duration_ns = cfg.history_window_ns;
+    out->avg_bandwidth_gbps = duration_ns > 0.0 ? static_cast<double>(bytes) / duration_ns : 0.0;
+    double peak = cfg.peak_bandwidth_per_channel_gbps();
+    out->utilization_pct = peak > 0.0 ? out->avg_bandwidth_gbps / peak * 100.0 : 0.0;
+    return 0;
+}
+
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {
     if (!engine || !out_path) return -1;
     std::lock_guard<std::mutex> lock(engine->mutex);

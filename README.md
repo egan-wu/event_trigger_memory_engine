@@ -275,16 +275,29 @@ at identical bandwidth:
   outstanding cap and still serialize badly if it's only ever landing on a
   handful of banks — an address-mapping spread problem, not a timing one.
 
+For a multi-channel config, every field above is an **aggregate across all
+channels** — which hides a real failure mode of its own: "50% overall
+utilization" reads identically whether it's every channel evenly at 50%, or
+one channel maxed out and the rest sitting idle. Each window's `channels`
+array (JSON) / `ch{N}_dram_bytes` and `ch{N}_avg_bandwidth_gbps` columns
+(CSV) — or `ddrt_get_window_channel_stats(engine, window_index, channel_index, &out)`
+(C API) — break bandwidth out per physical channel specifically so that
+distinction doesn't get lost in the sum. `ddrt_get_num_channels()` gives the
+count to iterate. A single-channel config still gets the aggregate fields,
+just nothing to compare a lone channel against, so the CLI/viewer skip the
+per-channel panel in that case.
+
 ### Viewing it: `tools/windowed_history_viewer.html`
 
 A standalone, dependency-free companion page — open it directly in a browser
 (`file://`, no server, no build step) and drop in any `--windowed-csv`
-output to get the same 4-panel view (bandwidth, row-status, outstanding
-occupancy, bank utilization) with a synchronized hover tooltip across all
-panels. It reads columns by name from the CSV header, so a CSV from an older
-version of this tool that's missing the outstanding/bank columns just
-renders fewer panels instead of breaking. For a trace with more rows than
-fit legibly on screen (tens of thousands of windows from a long trace), it
+output to get the same panels (bandwidth, per-channel bandwidth when there's
+more than one channel, row-status, outstanding occupancy, bank utilization)
+with a synchronized hover tooltip across all of them. It reads columns by
+name from the CSV header, so a CSV from an older version of this tool that's
+missing some of the newer columns just renders fewer panels instead of
+breaking. For a trace with more rows than fit legibly on screen (tens of
+thousands of windows from a long trace), it
 automatically downsamples to a fixed number of display buckets — summing the
 additive fields (bytes, hits/conflicts/empties) and taking the max of the
 "peak" fields (outstanding/bank) across each merged group — and says so
@@ -442,6 +455,8 @@ be structured, not because it's the way to represent concurrency here.
 | `ddrt_prune_results_before(engine, max_txn_id)` | `int` | free retained results with `txn_id <= max_txn_id` — see "Feeding it from a long-running DMA model" above |
 | `ddrt_get_num_windows(engine)` | `uint64_t` | count of windows in the bandwidth/byte-access history — see "Windowed history" above |
 | `ddrt_get_window_at(engine, index, &out)` | `int` | one window's stats by index into `out` |
+| `ddrt_get_num_channels(engine)` | `uint64_t` | `topology.channels`, for iterating the next function |
+| `ddrt_get_window_channel_stats(engine, window_index, channel_index, &out)` | `int` | one window's per-channel breakdown — see "Windowed history" above |
 | `ddrt_write_report_json(engine, out_path)` | `int` | write the full summary + per-transaction report (+ windowed history, if enabled) to a JSON file |
 | `ddrt_last_error(engine)` | `const char*` | why the last call on this engine failed; pass `NULL` to read a failed `ddrt_create()`'s error instead |
 | `ddrt_version(void)` | `const char*` | library version string |

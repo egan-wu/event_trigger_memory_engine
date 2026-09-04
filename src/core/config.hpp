@@ -93,6 +93,13 @@ struct DdrcConfig {
         // bytes/cycle * cycles/ns = bytes/ns == GB/s, times number of channels
         return static_cast<double>(data_bus_bytes) / clock_period_ns() * channels;
     }
+    double peak_bandwidth_per_channel_gbps() const {
+        // Every channel shares the same data_bus_bytes/clock_mhz -- no per-
+        // channel override -- so each channel's own peak is just this,
+        // unmultiplied by channel count (peak_bandwidth_gbps() above is the
+        // aggregate across all of them).
+        return static_cast<double>(data_bus_bytes) / clock_period_ns();
+    }
     int total_banks() const {
         return std::max(1, channels) * std::max(1, ranks_per_channel) * std::max(1, bankgroups) * std::max(1, banks_per_group);
     }
