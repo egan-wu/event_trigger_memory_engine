@@ -304,3 +304,34 @@ DDRTEST(windowed_history_buckets_by_issue_cycle_and_survives_pruning) {
     DDR_CHECK_EQ(engine.windows()[0].bytes_read, 64ull);
     DDR_CHECK_EQ(engine.windows()[1].bytes_read, 64ull);
 }
+
+DDRTEST(windowed_history_tracks_outstanding_high_water_and_active_banks) {
+    DdrcConfig cfg = make_test_config();
+    cfg.bankgroups = 2;
+    cfg.banks_per_group = 2; // total_banks = 1 channel * 1 rank * 2 bg * 2 banks = 4
+    cfg.map_bank = AddressField::contiguous(10, 1);
+    cfg.map_bankgroup = AddressField::contiguous(11, 1);
+    cfg.map_row = AddressField::contiguous(12, 10);
+    cfg.history_window_ns = 100000.0; // huge -- everything below lands in window 0
+    cfg.max_outstanding_per_id = 2;
+    DDR_CHECK_EQ(cfg.total_banks(), 4);
+    Engine engine(cfg);
+
+    // Three distinct (bank, bankgroup) combinations: (0,0), (1,0), (0,1).
+    engine.push_txn(make_read(0x000, /*axi_id=*/9));
+    engine.push_txn(make_read(0x400, /*axi_id=*/9)); // bit10 set -> bank 1, same bankgroup
+    engine.push_txn(make_read(0x800, /*axi_id=*/9)); // bit11 set -> bank 0, other bankgroup
+
+    // A separate id pushed 3x with cap=2: the 3rd must wait for one of the
+    // first two to complete, so occupancy should peak at exactly the cap.
+    engine.push_txn(make_read(0x1000, /*axi_id=*/5));
+    engine.push_txn(make_read(0x1040, /*axi_id=*/5));
+    engine.push_txn(make_read(0x1080, /*axi_id=*/5));
+
+    engine.run();
+
+    DDR_CHECK(engine.windows().size() >= 1);
+    const WindowStats& w = engine.windows()[0];
+    DDR_CHECK_EQ(w.active_banks.size(), static_cast<size_t>(3));
+    DDR_CHECK_EQ(w.max_outstanding_count, 2ull);
+}

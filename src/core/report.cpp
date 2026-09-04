@@ -1,5 +1,6 @@
 #include "report.hpp"
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
@@ -81,6 +82,11 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
             wv.set("empties", static_cast<int64_t>(w.empties));
             double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
             wv.set("avg_bandwidth_gbps", bw);
+            wv.set("outstanding_high_water", static_cast<int64_t>(w.max_outstanding_count));
+            int max_out = std::max(1, engine.config().max_outstanding_per_id);
+            wv.set("outstanding_occupancy_pct", static_cast<double>(w.max_outstanding_count) / max_out * 100.0);
+            wv.set("active_bank_count", static_cast<int64_t>(w.active_banks.size()));
+            wv.set("bank_utilization_pct", static_cast<double>(w.active_banks.size()) / engine.config().total_banks() * 100.0);
             windows.push_back(std::move(wv));
         }
         root.set("windows", std::move(windows));
@@ -123,15 +129,23 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
     std::ofstream f(out_path, std::ios::binary);
     if (!f) throw std::runtime_error("cannot open output path for windowed CSV: " + out_path);
 
+    int max_out = std::max(1, engine.config().max_outstanding_per_id);
+    int total_banks = engine.config().total_banks();
+
     f << "window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,"
-         "hits,conflicts,empties,avg_bandwidth_gbps\n";
+         "hits,conflicts,empties,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,"
+         "active_bank_count,bank_utilization_pct\n";
     for (size_t i = 0; i < engine.windows().size(); ++i) {
         const WindowStats& w = engine.windows()[i];
         double start_ns = static_cast<double>(i) * window_ns;
         double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
+        double occ_pct = static_cast<double>(w.max_outstanding_count) / max_out * 100.0;
+        uint64_t active_banks = w.active_banks.size();
+        double bank_util_pct = static_cast<double>(active_banks) / total_banks * 100.0;
         f << i << ',' << start_ns << ',' << w.bytes_read << ',' << w.bytes_written << ','
           << w.dram_bytes << ',' << w.txn_count << ',' << w.hits << ',' << w.conflicts << ','
-          << w.empties << ',' << bw << '\n';
+          << w.empties << ',' << bw << ',' << w.max_outstanding_count << ',' << occ_pct << ','
+          << active_banks << ',' << bank_util_pct << '\n';
     }
 }
 

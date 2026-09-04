@@ -74,6 +74,24 @@ typedef struct {
     uint64_t txn_count;
     uint64_t hits, conflicts, empties;
     double avg_bandwidth_gbps; /* (bytes_read + bytes_written) / duration_ns */
+    /* High-water mark, across every (core, axi_id) stream active in this
+     * window, of that stream's outstanding-request count -- sampled exactly
+     * at each dispatch (occupancy for a stream only changes at its own
+     * dispatch instants, so nothing is missed). Compare against the config's
+     * max_outstanding_per_id: occupancy_pct pinned near 100% across a
+     * stretch means that cap, not the DRAM itself, is what's limiting
+     * throughput there. */
+    uint64_t outstanding_high_water;
+    double outstanding_occupancy_pct; /* outstanding_high_water / max_outstanding_per_id * 100 */
+    /* Distinct physical banks (channel/rank/bankgroup/bank) touched by at
+     * least one dispatched command in this window, out of
+     * channels*ranks_per_channel*bankgroups*banks_per_group total -- a
+     * measure of bank-level parallelism, independent of bus/outstanding
+     * saturation: a workload can be far from both of those limits and still
+     * serialize badly if it's only ever hitting a handful of banks (an
+     * address-mapping spread problem, not a timing one). */
+    uint64_t active_bank_count;
+    double bank_utilization_pct; /* active_bank_count / total_banks * 100 */
 } ddrt_window_stats_t;
 
 /* Create an engine from a DDRC JSON config file. Returns NULL on failure. */

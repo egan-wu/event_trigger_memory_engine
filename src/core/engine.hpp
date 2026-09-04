@@ -48,6 +48,22 @@ struct WindowStats {
     uint64_t dram_bytes = 0;
     uint64_t txn_count = 0;
     uint64_t hits = 0, conflicts = 0, empties = 0;
+    // High-water mark, across every (core, axi_id) stream active in this
+    // window, of that stream's outstanding-request count immediately after a
+    // dispatch (sampled at dispatch instants, which is exact: occupancy for a
+    // given stream only ever changes at its own dispatch events, so nothing
+    // is missed between samples). Compare against config max_outstanding_per_id
+    // to see whether the cap is actually the thing limiting throughput.
+    uint64_t max_outstanding_count = 0;
+    // Distinct physical banks (channel/rank/bankgroup/bank, post-modulo --
+    // i.e. exactly the banks_[] indices ChannelScheduler actually schedules
+    // against) touched by at least one dispatched command in this window.
+    // size() / total_banks (topology) is bank-level parallelism utilization:
+    // separate from bus/outstanding saturation -- a workload can be far from
+    // both of those limits and still serialize badly if it's only ever
+    // hitting a handful of banks (an address-mapping spread problem, not a
+    // timing one).
+    std::set<uint64_t> active_banks;
 };
 
 // One independent dispatch stream per (core_id, segment, axi_id): AXI

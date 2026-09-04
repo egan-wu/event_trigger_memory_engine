@@ -252,7 +252,45 @@ CSV for plotting, and `ddrt_write_report_json()` includes a `"windows"` array
 automatically whenever windowing is enabled. This library intentionally does
 not render charts itself — no third-party dependencies, stays a portable
 single binary — it only computes the numbers; plotting is a job for whatever
-consumes the CSV/JSON.
+consumes the CSV/JSON — including `tools/windowed_history_viewer.html`
+(below), which is exactly that: a consumer, not part of the library.
+
+Besides bandwidth and row-status, each window also reports two independent
+saturation signals, since "why is this slow" can have different answers even
+at identical bandwidth:
+
+- **Outstanding occupancy** (`outstanding_high_water` / `outstanding_occupancy_pct`):
+  the peak, across every `(core, axi_id)` stream active in the window, of that
+  stream's outstanding-request count, sampled exactly at dispatch (occupancy
+  only changes at a stream's own dispatch instants, so this is exact, not a
+  poll-and-miss sample). Pinned near 100% across a stretch means
+  `max_outstanding_per_id`, not DRAM itself, is what's capping throughput
+  there.
+- **Bank utilization** (`active_bank_count` / `bank_utilization_pct`): how many
+  distinct physical banks (post-modulo — the actual `banks_[]` indices
+  `ChannelScheduler` schedules against) saw at least one dispatched command in
+  the window, out of `channels * ranks_per_channel * bankgroups *
+  banks_per_group` total. This is a different failure mode from the other
+  two: a workload can be far below both the bus's bandwidth ceiling and the
+  outstanding cap and still serialize badly if it's only ever landing on a
+  handful of banks — an address-mapping spread problem, not a timing one.
+
+### Viewing it: `tools/windowed_history_viewer.html`
+
+A standalone, dependency-free companion page — open it directly in a browser
+(`file://`, no server, no build step) and drop in any `--windowed-csv`
+output to get the same 4-panel view (bandwidth, row-status, outstanding
+occupancy, bank utilization) with a synchronized hover tooltip across all
+panels. It reads columns by name from the CSV header, so a CSV from an older
+version of this tool that's missing the outstanding/bank columns just
+renders fewer panels instead of breaking. For a trace with more rows than
+fit legibly on screen (tens of thousands of windows from a long trace), it
+automatically downsamples to a fixed number of display buckets — summing the
+additive fields (bytes, hits/conflicts/empties) and taking the max of the
+"peak" fields (outstanding/bank) across each merged group — and says so
+on-screen (`"downsampled to N display buckets"`) rather than silently
+reducing resolution. Nothing is uploaded anywhere; it's pure client-side
+JS/SVG.
 
 ## Feeding it from a long-running DMA model (no "end of log")
 

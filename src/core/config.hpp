@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -91,6 +92,9 @@ struct DdrcConfig {
     double peak_bandwidth_gbps() const {
         // bytes/cycle * cycles/ns = bytes/ns == GB/s, times number of channels
         return static_cast<double>(data_bus_bytes) / clock_period_ns() * channels;
+    }
+    int total_banks() const {
+        return std::max(1, channels) * std::max(1, ranks_per_channel) * std::max(1, bankgroups) * std::max(1, banks_per_group);
     }
 
     static DdrcConfig load_from_file(const std::string& path);

@@ -152,6 +152,15 @@ void Engine::run() {
         uint64_t last_window = ((txn.addr + total_bytes - 1) / chunk_bytes) * chunk_bytes;
         uint32_t num_chunks = static_cast<uint32_t>((last_window - first_window) / chunk_bytes) + 1;
 
+        // Computed up front (doesn't depend on per-chunk data) so the chunk
+        // loop below can record bank activity into the right window as it goes.
+        WindowStats* w = nullptr;
+        if (history_window_cycles_ > 0) {
+            size_t window_index = static_cast<size_t>(issue_cycle / history_window_cycles_);
+            if (windows_.size() <= window_index) windows_.resize(window_index + 1);
+            w = &windows_[window_index];
+        }
+
         uint64_t max_complete = issue_cycle;
         for (uint32_t i = 0; i < num_chunks; ++i) {
             uint64_t window_addr = first_window + static_cast<uint64_t>(i) * chunk_bytes;
@@ -175,6 +184,19 @@ void Engine::run() {
                 case RowStatus::Conflict: res.conflicts++; break;
                 case RowStatus::Empty: res.empties++; break;
             }
+
+            if (w) {
+                // Same modulo reduction ChannelScheduler itself uses to index
+                // banks_[], so this counts actual physical banks, not raw
+                // (possibly out-of-range) decoded field values.
+                uint32_t rank_idx = cmd.addr.rank % static_cast<uint32_t>(std::max(1, cfg_.ranks_per_channel));
+                uint32_t bg_idx = cmd.addr.bankgroup % static_cast<uint32_t>(std::max(1, cfg_.bankgroups));
+                uint32_t bank_idx = cmd.addr.bank % static_cast<uint32_t>(std::max(1, cfg_.banks_per_group));
+                uint64_t bank_key = ((static_cast<uint64_t>(ch) * static_cast<uint64_t>(std::max(1, cfg_.ranks_per_channel)) + rank_idx) *
+                                          static_cast<uint64_t>(std::max(1, cfg_.bankgroups)) + bg_idx) *
+                                         static_cast<uint64_t>(std::max(1, cfg_.banks_per_group)) + bank_idx;
+                w->active_banks.insert(bank_key);
+            }
         }
 
         res.complete_cycle = max_complete;
@@ -188,20 +210,19 @@ void Engine::run() {
         cum_latency_sum_ns_ += res.latency_ns;
         cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
 
-        if (history_window_cycles_ > 0) {
-            size_t window_index = static_cast<size_t>(res.issue_cycle / history_window_cycles_);
-            if (windows_.size() <= window_index) windows_.resize(window_index + 1);
-            WindowStats& w = windows_[window_index];
-            if (res.type == TxnType::Read) w.bytes_read += res.bytes;
-            else w.bytes_written += res.bytes;
-            w.dram_bytes += res.dram_bytes;
-            w.txn_count++;
-            w.hits += res.hits;
-            w.conflicts += res.conflicts;
-            w.empties += res.empties;
+        idc.outstanding.insert(max_complete);
+
+        if (w) {
+            if (res.type == TxnType::Read) w->bytes_read += res.bytes;
+            else w->bytes_written += res.bytes;
+            w->dram_bytes += res.dram_bytes;
+            w->txn_count++;
+            w->hits += res.hits;
+            w->conflicts += res.conflicts;
+            w->empties += res.empties;
+            w->max_outstanding_count = std::max(w->max_outstanding_count, static_cast<uint64_t>(idc.outstanding.size()));
         }
 
-        idc.outstanding.insert(max_complete);
         idc.pending.pop_front();
         core_port_free_cycle_[core_id] = issue_cycle + kMinIssueSpacingCycles;
         seg.max_complete = std::max(seg.max_complete, max_complete);
