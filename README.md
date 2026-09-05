@@ -446,13 +446,13 @@ Every metric above runs through the exact same `summary`/`extremes`/`series`
 machinery, whether it comes straight from a CSV column or is derived on the
 fly:
 
-| metric | source | always present? |
-|---|---|---|
-| `avg_bandwidth_gbps` | CSV column | yes |
-| `outstanding_occupancy_pct` | CSV column | only if the CSV has it |
-| `bank_utilization_pct` | CSV column | only if the CSV has it |
-| `conflict_pct` / `hit_pct` | derived per-window from `hits`/`conflicts`/`empties` | yes |
-| `bankgroup_reuse_pct` | derived per-window from `bankgroup_reuse_count` | only if the CSV has that column |
+| metric | meaning | source | always present? |
+|---|---|---|---|
+| `avg_bandwidth_gbps` | useful bytes/s delivered in that window | CSV column | yes |
+| `outstanding_occupancy_pct` | peak in-flight-request occupancy vs `max_outstanding_per_id`, in that window — pinned near 100% means the outstanding cap, not DRAM itself, may be capping throughput there | CSV column | only if the CSV has it |
+| `bank_utilization_pct` | % of physical banks touched by at least one command in that window — low means traffic is landing on only a handful of banks, an address-mapping spread problem | CSV column | only if the CSV has it |
+| `conflict_pct` / `hit_pct` | % of that window's DRAM column commands classified row-conflict / row-hit | derived per-window from `hits`/`conflicts`/`empties` | yes |
+| `bankgroup_reuse_pct` | % of that window's column commands that paid `tCCD_L` (same bank group as the immediately preceding command) instead of the near-free `tCCD_S` — see "Bank-group ordering" above | derived per-window from `bankgroup_reuse_count` | only if the CSV has that column |
 
 `conflict_pct`/`hit_pct` exist so a *trend* across the trace — e.g. conflict
 rate climbing across consecutive windows, the signature of a scheduler
