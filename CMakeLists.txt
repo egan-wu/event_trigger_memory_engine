@@ -54,4 +54,11 @@ add_test(NAME ddrtiming_tests COMMAND ddrtiming_tests)
 add_test(NAME windowed_history_analyze_smoke
          COMMAND windowed_history_analyze --csv ${CMAKE_CURRENT_SOURCE_DIR}/examples/windowed_history_imbalance.example.csv)
 set_tests_properties(windowed_history_analyze_smoke PROPERTIES
-    PASS_REGULAR_EXPRESSION "channel_imbalance")
+    PASS_REGULAR_EXPRESSION "avg_bandwidth_gbps")
+
+add_test(NAME windowed_history_analyze_baseline_smoke
+         COMMAND windowed_history_analyze
+                 --csv ${CMAKE_CURRENT_SOURCE_DIR}/examples/windowed_history_imbalance.example.csv
+                 --baseline ${CMAKE_CURRENT_SOURCE_DIR}/examples/windowed_history_imbalance.example.csv)
+set_tests_properties(windowed_history_analyze_baseline_smoke PROPERTIES
+    PASS_REGULAR_EXPRESSION "baseline_delta")

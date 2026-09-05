@@ -312,50 +312,100 @@ is the same data for a caller that can't look at one — an AI agent, a CI gate,
 a script piping into `jq` — anything that needs to *reason about* a trace
 without eyeballing it. It's a separate standalone executable (built as part of
 this project, not linked into `libddrtiming`): reads a `--windowed-csv` file
-alone, no config or engine state needed, and prints structured JSON findings.
+alone, no config or engine state needed, and prints a structured statistical
+export as JSON.
 
 ```
-windowed_history_analyze --csv history.csv [--out findings.json]
+windowed_history_analyze --csv history.csv [--baseline other_history.csv] [--out report.json]
 ```
+
+**Design principle: numbers, not verdicts.** An earlier version of this tool
+scanned for a handful of hardcoded conditions (e.g. "bank utilization below
+25%") and emitted pass/fail-style findings with a severity label. Those
+thresholds don't generalize — what's a healthy `bank_utilization_pct` on a
+4-bank config is nothing like what's healthy on a 32-bank config, so any
+fixed cutoff is wrong for someone. This tool now only reports objective
+statistics; deciding what counts as a problem, and what to do about it, is
+entirely up to the caller.
 
 Output shape:
 
 ```json
 {
   "summary": {
-    "num_windows": 141, "num_channels": 2, "total_bytes": 123456789,
-    "avg_bandwidth_gbps": 7.61, "avg_outstanding_occupancy_pct": 100.0,
-    "avg_bank_utilization_pct": 3.15, "hit_rate_pct": 96.9, "conflict_rate_pct": 1.2
+    "num_windows": 141, "num_channels": 2, "window_ns": 1000000,
+    "total_bytes": 123456789, "hit_rate_pct": 96.9, "conflict_rate_pct": 1.2,
+    "metrics": {
+      "avg_bandwidth_gbps": {
+        "mean": 7.61, "stddev": 3.2,
+        "p0": 0.0, "p1": 0.4, "p5": 1.1, "p25": 5.0, "p50": 7.9,
+        "p75": 10.2, "p95": 14.8, "p99": 16.0, "p100": 17.07
+      },
+      "outstanding_occupancy_pct": { "mean": 100.0, "...": "..." },
+      "bank_utilization_pct": { "mean": 3.15, "...": "..." }
+    },
+    "channels": [
+      { "index": 0, "avg_bandwidth_gbps": { "mean": 8.53, "...": "..." } },
+      { "index": 1, "avg_bandwidth_gbps": { "mean": 0.6, "...": "..." } }
+    ]
   },
-  "findings": [
-    {
-      "type": "channel_imbalance", "severity": "warning",
-      "window_start": 0, "window_end": 140, "start_ns": 0, "end_ns": 42000,
-      "detail": "channel 1 averaged 0 GB/s while channel 0 averaged 15.2 GB/s ..."
+  "extremes": {
+    "avg_bandwidth_gbps": {
+      "lowest": [ { "window_index": 417, "start_ns": 417000, "end_ns": 418000, "value": 0.0 }, "..." ],
+      "highest": [ "..." ]
+    },
+    "channels": [ { "index": 0, "avg_bandwidth_gbps": { "lowest": ["..."], "highest": ["..."] } }, "..." ]
+  },
+  "series": {
+    "bucket_windows": 1,
+    "buckets": [
+      {
+        "window_start": 0, "window_end": 0, "start_ns": 0, "end_ns": 1000000,
+        "metrics": {
+          "avg_bandwidth_gbps": {
+            "mean": 17.07, "p50": 17.07,
+            "min": { "value": 17.07, "window_index": 0 },
+            "max": { "value": 17.07, "window_index": 0 }
+          }
+        },
+        "channels": [ "..." ]
+      }
+    ]
+  },
+  "baseline_delta": {
+    "hit_rate_pct": -1.4, "conflict_rate_pct": 0.3,
+    "metrics": {
+      "avg_bandwidth_gbps": { "target_mean": 11.21, "baseline_mean": 13.74, "delta": -2.53, "delta_pct": -18.4 }
     }
-  ]
+  }
 }
 ```
 
+Four parts:
+
+- **`summary`** — whole-trace distribution per metric (mean, stddev, and a
+  `p0`..`p100` percentile ladder), plus per-channel bandwidth distributions.
+  Pure descriptive statistics.
+- **`extremes`** — the 10 lowest- and 10 highest-value windows per metric,
+  each naming its exact `window_index`/`start_ns`/`end_ns` so a caller can go
+  read that row straight out of the original CSV. This is what keeps a rare
+  single-window anomaly from ever getting smoothed away by aggregation,
+  independent of where bucket boundaries happen to fall.
+- **`series`** — a fixed number of time buckets (~150) regardless of how many
+  windows the trace has, so output size doesn't scale with trace length. Each
+  bucket reports `mean` and `p50` (so a caller can tell "a couple of
+  outliers" from "the whole bucket shifted") plus the exact `min`/`max`
+  window within that bucket — a short burst inside an otherwise-flat bucket
+  still shows up instead of being averaged into the mean.
+- **`baseline_delta`** (only with `--baseline`) — summary-level comparison
+  against a second trace, e.g. the same workload before/after a config
+  change: `target_mean - baseline_mean` and `delta_pct` per metric. This is
+  summary-only, not per-bucket — the two traces can have different lengths,
+  so aligning their bucket boundaries is left unsolved on purpose.
+
 Like the viewer, it degrades gracefully on an older CSV missing newer columns
-(outstanding/bank/per-channel) — it just skips the rules that need them and
-omits the corresponding `summary` fields, rather than failing. Four rules run
-today, each a distinct saturation signal (see the field descriptions above —
-this tool is the same four dimensions, turned into pass/fail checks instead
-of a chart to read):
-
-| `type` | Fires when | `severity` |
-|---|---|---|
-| `channel_imbalance` | `num_channels >= 2` and, for >= 2 consecutive windows, the quietest channel is under 30% of the busiest (and the busiest isn't 0) | warning |
-| `outstanding_saturated` | `outstanding_occupancy_pct >= 90%` in at least half the trace's windows — `max_outstanding_per_id`, not DRAM timing, is the likely limiter | warning |
-| `bank_underutilized` | trace-average `bank_utilization_pct < 25%` — traffic isn't spread across available banks | info |
-| `bandwidth_drop` | for >= 3 consecutive windows, bandwidth is under 40% of the trace's own median (detail includes the row-conflict rate for that range, since a high conflict rate there is usually the explanation) | warning |
-
-Findings are self-contained on purpose: `window_start`/`window_end` plus
-`start_ns`/`end_ns` pin down exactly where, and `detail` states the concrete
-numbers behind the finding, so a caller can act on the JSON alone. An empty
-`findings` array is a meaningful, valid result (the trace looked healthy by
-these rules), not an error.
+(outstanding/bank/per-channel) — the corresponding metric is just omitted
+from `metrics`/`extremes`/`series` rather than the tool failing.
 
 ## Feeding it from a long-running DMA model (no "end of log")
 
