@@ -93,169 +93,275 @@ void Engine::prune_results_before(uint64_t max_txn_id) {
         results_.end());
 }
 
+bool Engine::any_channel_has_pending() const {
+    for (const auto& ch : channels_) {
+        if (ch->has_pending()) return true;
+    }
+    return false;
+}
+
+// Folds a just-dispatched chunk's outcome into its owning txn's in-progress
+// accumulator, and finalizes that txn once every one of its chunks has been
+// dispatched (chunks can dispatch across many separate drain_one() calls,
+// interleaved with other streams' chunks -- see Engine::run()).
+void Engine::route_completed_chunk(const DramCommand& done) {
+    Segment& seg = segments_[done.core_id][static_cast<size_t>(done.segment_idx)];
+    IdCursor& idc = seg.by_id[done.axi_id];
+    IdCursor::InProgress& ip = idc.in_progress;
+
+    ip.max_complete = std::max(ip.max_complete, done.complete_cycle);
+    if (done.seq_in_txn == 0) ip.dominant_row_status = done.row_status;
+    switch (done.row_status) {
+        case RowStatus::Hit: ip.hits++; break;
+        case RowStatus::Conflict: ip.conflicts++; break;
+        case RowStatus::Empty: ip.empties++; break;
+    }
+
+    if (ip.has_window) {
+        WindowStats& w = windows_[ip.window_index];
+        if (done.bankgroup_reuse) w.bankgroup_reuse_count++;
+        uint32_t ch = done.addr.channel % static_cast<uint32_t>(channels_.size());
+        // Same modulo reduction ChannelScheduler itself uses to index
+        // banks_[], so this counts actual physical banks, not raw (possibly
+        // out-of-range) decoded field values.
+        uint32_t rank_idx = done.addr.rank % static_cast<uint32_t>(std::max(1, cfg_.ranks_per_channel));
+        uint32_t bg_idx = done.addr.bankgroup % static_cast<uint32_t>(std::max(1, cfg_.bankgroups));
+        uint32_t bank_idx = done.addr.bank % static_cast<uint32_t>(std::max(1, cfg_.banks_per_group));
+        uint64_t bank_key = ((static_cast<uint64_t>(ch) * static_cast<uint64_t>(std::max(1, cfg_.ranks_per_channel)) + rank_idx) *
+                                  static_cast<uint64_t>(std::max(1, cfg_.bankgroups)) + bg_idx) *
+                                 static_cast<uint64_t>(std::max(1, cfg_.banks_per_group)) + bank_idx;
+        w.active_banks.insert(bank_key);
+
+        if (w.dram_bytes_per_channel.size() <= ch) w.dram_bytes_per_channel.resize(ch + 1, 0);
+        w.dram_bytes_per_channel[ch] += done.bytes;
+    }
+
+    ip.chunks_dispatched++;
+    if (ip.chunks_dispatched == ip.num_chunks) {
+        finalize_in_progress_txn(done.core_id, done.segment_idx, done.axi_id);
+    }
+}
+
+// Ports the old per-txn "after the chunk loop" bookkeeping verbatim, just
+// reading from IdCursor::InProgress instead of loop-local variables, since
+// it can now run at a different program point than when the txn's chunks
+// were generated (see Engine::run()).
+void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi_id) {
+    Segment& seg = segments_[core_id][static_cast<size_t>(segment_idx)];
+    IdCursor& idc = seg.by_id[axi_id];
+    IdCursor::InProgress& ip = idc.in_progress;
+
+    TxnResult res;
+    res.txn_id = ip.txn_id;
+    res.core_id = ip.core_id;
+    res.type = ip.type;
+    res.addr = ip.addr;
+    res.issue_cycle = ip.issue_cycle;
+    res.bytes = static_cast<uint32_t>(ip.bytes);
+    res.complete_cycle = ip.max_complete;
+    res.latency_ns = static_cast<double>(ip.max_complete - ip.issue_cycle) * cfg_.clock_period_ns();
+    res.dram_bytes = ip.num_chunks * static_cast<uint32_t>(ip.chunk_bytes);
+    res.dominant_row_status = ip.dominant_row_status;
+    res.hits = ip.hits;
+    res.conflicts = ip.conflicts;
+    res.empties = ip.empties;
+    results_.push_back(res);
+
+    cum_total_txns_++;
+    cum_total_bytes_ += res.bytes;
+    cum_total_dram_bytes_ += res.dram_bytes;
+    cum_latency_sum_ns_ += res.latency_ns;
+    cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
+
+    idc.outstanding.insert(ip.max_complete);
+
+    if (ip.has_window) {
+        WindowStats& w = windows_[ip.window_index];
+        if (res.type == TxnType::Read) w.bytes_read += res.bytes;
+        else w.bytes_written += res.bytes;
+        w.dram_bytes += res.dram_bytes;
+        w.txn_count++;
+        w.hits += res.hits;
+        w.conflicts += res.conflicts;
+        w.empties += res.empties;
+        w.max_outstanding_count = std::max(w.max_outstanding_count, static_cast<uint64_t>(idc.outstanding.size()));
+    }
+
+    idc.pending.pop_front();
+    seg.max_complete = std::max(seg.max_complete, ip.max_complete);
+
+    if (!idc.pending.empty()) {
+        uint64_t next_port_free = core_port_free_cycle_[core_id];
+        uint64_t next_id_gate = (idc.outstanding.size() >= max_out_) ? *idc.outstanding.begin() : 0;
+        heap_.push({std::max({next_port_free, next_id_gate, seg.gate_cycle}), core_id, segment_idx, axi_id, 0});
+        // idc.queued stays true -- this cursor still has an event pending.
+    } else {
+        idc.queued = false;
+        if (seg.closed) {
+            bool drained = true;
+            for (auto& [id, c] : seg.by_id) {
+                if (!c.pending.empty()) { drained = false; break; }
+            }
+            if (drained) {
+                std::vector<Segment>& segs = segments_[core_id];
+                size_t next_idx = static_cast<size_t>(segment_idx) + 1;
+                if (next_idx < segs.size() && !segs[next_idx].gate_known) {
+                    segs[next_idx].gate_known = true;
+                    segs[next_idx].gate_cycle = seg.max_complete;
+                    for (auto& [nid, ncur] : segs[next_idx].by_id) {
+                        (void)ncur;
+                        enqueue_if_ready(core_id, static_cast<int>(next_idx), nid);
+                    }
+                }
+            }
+        }
+    }
+}
+
 void Engine::run() {
     AddressDecoder decoder(cfg_);
 
-    while (!heap_.empty()) {
+    // Loop while there is either front-end work to consider (the heap) or
+    // dispatched-but-still-queued commands sitting in some channel (which
+    // can only be true once the heap has momentarily run dry -- see the
+    // "else" branch below). Whichever a channel's FR-FCFS selection defers,
+    // it defers only until the *next* time that channel needs to make room
+    // or until this final drain -- never indefinitely.
+    while (!heap_.empty() || any_channel_has_pending()) {
+        if (heap_.empty()) {
+            // Nothing left to admit right now -- force one dispatch so
+            // finalization can (maybe) push more front-end work and revive
+            // the loop above. Picks the first channel with anything queued;
+            // which one is arbitrary since channels are independent.
+            for (auto& channel : channels_) {
+                if (channel->has_pending()) {
+                    DramCommand done = channel->drain_one();
+                    route_completed_chunk(done);
+                    break;
+                }
+            }
+            continue;
+        }
+
         Event ev = heap_.top();
         heap_.pop();
 
         Segment& seg = segments_[ev.core_id][static_cast<size_t>(ev.segment_idx)];
         IdCursor& idc = seg.by_id[ev.axi_id];
-        if (idc.pending.empty()) continue;
 
-        // Recompute the true issue cycle: gate on this id's outstanding cap,
-        // the core's shared port being free, and the segment's barrier gate.
-        uint64_t port_free = core_port_free_cycle_[ev.core_id];
-        uint64_t id_gate = (idc.outstanding.size() >= max_out_) ? *idc.outstanding.begin() : 0;
-        uint64_t issue_cycle = std::max({port_free, id_gate, seg.gate_cycle});
+        if (ev.chunk_resume_idx == 0) {
+            if (idc.pending.empty()) continue;
 
-        if (issue_cycle != ev.ready_cycle) {
-            // Stale entry -- the port advanced (another id from this core
-            // dispatched) since this was queued. Reschedule with the fresh gate.
-            heap_.push({issue_cycle, ev.core_id, ev.segment_idx, ev.axi_id});
-            continue;
-        }
-        // Drain this id's outstanding entries that have completed by now.
-        while (!idc.outstanding.empty() && *idc.outstanding.begin() <= issue_cycle) {
-            idc.outstanding.erase(idc.outstanding.begin());
-        }
+            // Recompute the true issue cycle: gate on this id's outstanding
+            // cap, the core's shared port being free, and the segment's
+            // barrier gate.
+            uint64_t port_free = core_port_free_cycle_[ev.core_id];
+            uint64_t id_gate = (idc.outstanding.size() >= max_out_) ? *idc.outstanding.begin() : 0;
+            uint64_t issue_cycle = std::max({port_free, id_gate, seg.gate_cycle});
 
-        int core_id = ev.core_id;
-        const AxiTxn& txn = idc.pending.front();
-        uint64_t total_bytes = static_cast<uint64_t>(txn.size_bytes) * txn.len_beats;
-        if (total_bytes == 0) total_bytes = txn.size_bytes;
-        // A genuinely zero-sized transaction (size_bytes==0 and len_beats==0)
-        // would otherwise underflow the window math below (txn.addr + 0 - 1);
-        // treat it as the smallest possible access rather than corrupting
-        // num_chunks into a huge/wrapped value.
-        if (total_bytes == 0) total_bytes = 1;
-
-        TxnResult res;
-        res.txn_id = txn.txn_id;
-        res.core_id = txn.core_id;
-        res.type = txn.type;
-        res.addr = txn.addr;
-        res.issue_cycle = issue_cycle;
-        res.bytes = static_cast<uint32_t>(total_bytes);
-
-        // DRAM only ever transfers whole burst-aligned windows (chunk_bytes
-        // each) -- never a partial burst -- so the windows touched are
-        // determined by aligning [addr, addr+total_bytes) to that grid, not
-        // by walking chunk_bytes forward from addr itself (addr need not be
-        // aligned). Every window costs a full burst's worth of physical
-        // transfer time and dram_bytes, even where it only partially
-        // overlaps what was actually requested -- that gap is over-fetch.
-        uint64_t chunk_bytes = static_cast<uint64_t>(std::max(1, cfg_.data_bus_bytes)) *
-                                static_cast<uint64_t>(std::max(1, cfg_.burst_beats));
-        uint64_t first_window = (txn.addr / chunk_bytes) * chunk_bytes;
-        uint64_t last_window = ((txn.addr + total_bytes - 1) / chunk_bytes) * chunk_bytes;
-        uint32_t num_chunks = static_cast<uint32_t>((last_window - first_window) / chunk_bytes) + 1;
-
-        // Computed up front (doesn't depend on per-chunk data) so the chunk
-        // loop below can record bank activity into the right window as it goes.
-        WindowStats* w = nullptr;
-        if (history_window_cycles_ > 0) {
-            size_t window_index = static_cast<size_t>(issue_cycle / history_window_cycles_);
-            if (windows_.size() <= window_index) windows_.resize(window_index + 1);
-            w = &windows_[window_index];
-        }
-
-        uint64_t max_complete = issue_cycle;
-        for (uint32_t i = 0; i < num_chunks; ++i) {
-            uint64_t window_addr = first_window + static_cast<uint64_t>(i) * chunk_bytes;
-
-            DramCommand cmd;
-            cmd.txn_id = txn.txn_id;
-            cmd.core_id = txn.core_id;
-            cmd.type = txn.type;
-            cmd.addr = decoder.decode(window_addr);
-            cmd.bytes = static_cast<uint32_t>(chunk_bytes); // physical: always a full burst
-            cmd.seq_in_txn = i;
-            cmd.total_in_txn = num_chunks;
-
-            uint32_t ch = cmd.addr.channel % static_cast<uint32_t>(channels_.size());
-            uint64_t complete = channels_[ch]->schedule(cmd, issue_cycle);
-            max_complete = std::max(max_complete, complete);
-
-            if (i == 0) res.dominant_row_status = cmd.row_status;
-            switch (cmd.row_status) {
-                case RowStatus::Hit: res.hits++; break;
-                case RowStatus::Conflict: res.conflicts++; break;
-                case RowStatus::Empty: res.empties++; break;
+            if (issue_cycle != ev.ready_cycle) {
+                // Stale entry -- the port advanced (another id from this core
+                // dispatched) since this was queued. Reschedule with the fresh gate.
+                heap_.push({issue_cycle, ev.core_id, ev.segment_idx, ev.axi_id, 0});
+                continue;
+            }
+            // Drain this id's outstanding entries that have completed by now.
+            while (!idc.outstanding.empty() && *idc.outstanding.begin() <= issue_cycle) {
+                idc.outstanding.erase(idc.outstanding.begin());
             }
 
-            if (w) {
-                // Same modulo reduction ChannelScheduler itself uses to index
-                // banks_[], so this counts actual physical banks, not raw
-                // (possibly out-of-range) decoded field values.
-                uint32_t rank_idx = cmd.addr.rank % static_cast<uint32_t>(std::max(1, cfg_.ranks_per_channel));
-                uint32_t bg_idx = cmd.addr.bankgroup % static_cast<uint32_t>(std::max(1, cfg_.bankgroups));
-                uint32_t bank_idx = cmd.addr.bank % static_cast<uint32_t>(std::max(1, cfg_.banks_per_group));
-                uint64_t bank_key = ((static_cast<uint64_t>(ch) * static_cast<uint64_t>(std::max(1, cfg_.ranks_per_channel)) + rank_idx) *
-                                          static_cast<uint64_t>(std::max(1, cfg_.bankgroups)) + bg_idx) *
-                                         static_cast<uint64_t>(std::max(1, cfg_.banks_per_group)) + bank_idx;
-                w->active_banks.insert(bank_key);
+            const AxiTxn& txn = idc.pending.front();
+            uint64_t total_bytes = static_cast<uint64_t>(txn.size_bytes) * txn.len_beats;
+            if (total_bytes == 0) total_bytes = txn.size_bytes;
+            // A genuinely zero-sized transaction (size_bytes==0 and
+            // len_beats==0) would otherwise underflow the window math below
+            // (txn.addr + 0 - 1); treat it as the smallest possible access
+            // rather than corrupting num_chunks into a huge/wrapped value.
+            if (total_bytes == 0) total_bytes = 1;
 
-                if (w->dram_bytes_per_channel.size() <= ch) w->dram_bytes_per_channel.resize(ch + 1, 0);
-                w->dram_bytes_per_channel[ch] += cmd.bytes;
+            // DRAM only ever transfers whole burst-aligned windows
+            // (chunk_bytes each) -- never a partial burst -- so the windows
+            // touched are determined by aligning [addr, addr+total_bytes) to
+            // that grid, not by walking chunk_bytes forward from addr itself
+            // (addr need not be aligned). Every window costs a full burst's
+            // worth of physical transfer time and dram_bytes, even where it
+            // only partially overlaps what was actually requested -- that
+            // gap is over-fetch.
+            uint64_t chunk_bytes = static_cast<uint64_t>(std::max(1, cfg_.data_bus_bytes)) *
+                                    static_cast<uint64_t>(std::max(1, cfg_.burst_beats));
+            uint64_t first_window = (txn.addr / chunk_bytes) * chunk_bytes;
+            uint64_t last_window = ((txn.addr + total_bytes - 1) / chunk_bytes) * chunk_bytes;
+            uint32_t num_chunks = static_cast<uint32_t>((last_window - first_window) / chunk_bytes) + 1;
+
+            IdCursor::InProgress& ip = idc.in_progress;
+            ip = IdCursor::InProgress{};
+            ip.txn_id = txn.txn_id;
+            ip.core_id = txn.core_id;
+            ip.type = txn.type;
+            ip.addr = txn.addr;
+            ip.issue_cycle = issue_cycle;
+            ip.bytes = total_bytes;
+            ip.chunk_bytes = chunk_bytes;
+            ip.first_window_addr = first_window;
+            ip.num_chunks = num_chunks;
+            ip.next_chunk_idx = 0;
+            ip.chunks_dispatched = 0;
+            ip.max_complete = issue_cycle;
+
+            if (history_window_cycles_ > 0) {
+                size_t window_index = static_cast<size_t>(issue_cycle / history_window_cycles_);
+                if (windows_.size() <= window_index) windows_.resize(window_index + 1);
+                ip.has_window = true;
+                ip.window_index = window_index;
             }
+
+            // Front-end port advance happens at admission, decoupled from
+            // this txn's (possibly much later) dispatch/completion --
+            // exactly like today: a core may have several of its own txns
+            // simultaneously in flight, up to the outstanding cap.
+            core_port_free_cycle_[ev.core_id] = issue_cycle + kMinIssueSpacingCycles;
         }
 
-        res.complete_cycle = max_complete;
-        res.latency_ns = static_cast<double>(max_complete - issue_cycle) * cfg_.clock_period_ns();
-        res.dram_bytes = num_chunks * static_cast<uint32_t>(chunk_bytes);
-        results_.push_back(res);
+        IdCursor::InProgress& ip = idc.in_progress;
+        uint32_t i = ev.chunk_resume_idx; // == 0 also correct: freshly (re)initialized above
 
-        cum_total_txns_++;
-        cum_total_bytes_ += res.bytes;
-        cum_total_dram_bytes_ += res.dram_bytes;
-        cum_latency_sum_ns_ += res.latency_ns;
-        cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
+        uint64_t window_addr = ip.first_window_addr + static_cast<uint64_t>(i) * ip.chunk_bytes;
+        DramCommand cmd;
+        cmd.txn_id = ip.txn_id;
+        cmd.core_id = ip.core_id;
+        cmd.segment_idx = ev.segment_idx;
+        cmd.axi_id = ev.axi_id;
+        cmd.type = ip.type;
+        cmd.addr = decoder.decode(window_addr);
+        cmd.bytes = static_cast<uint32_t>(ip.chunk_bytes); // physical: always a full burst
+        cmd.seq_in_txn = i;
+        cmd.total_in_txn = ip.num_chunks;
 
-        idc.outstanding.insert(max_complete);
-
-        if (w) {
-            if (res.type == TxnType::Read) w->bytes_read += res.bytes;
-            else w->bytes_written += res.bytes;
-            w->dram_bytes += res.dram_bytes;
-            w->txn_count++;
-            w->hits += res.hits;
-            w->conflicts += res.conflicts;
-            w->empties += res.empties;
-            w->max_outstanding_count = std::max(w->max_outstanding_count, static_cast<uint64_t>(idc.outstanding.size()));
+        uint32_t ch = cmd.addr.channel % static_cast<uint32_t>(channels_.size());
+        ChannelScheduler& channel = *channels_[ch];
+        if (!channel.has_room()) {
+            // Make exactly one slot's worth of room. The dispatched command
+            // may belong to a completely different stream (possibly a
+            // different core) than the one we're about to admit -- that's
+            // the reordering this whole design exists for.
+            DramCommand done = channel.drain_one();
+            route_completed_chunk(done);
         }
+        channel.try_admit(cmd, ip.issue_cycle); // room guaranteed by the check above
 
-        idc.pending.pop_front();
-        core_port_free_cycle_[core_id] = issue_cycle + kMinIssueSpacingCycles;
-        seg.max_complete = std::max(seg.max_complete, max_complete);
-
-        if (!idc.pending.empty()) {
-            uint64_t next_port_free = core_port_free_cycle_[core_id];
-            uint64_t next_id_gate = (idc.outstanding.size() >= max_out_) ? *idc.outstanding.begin() : 0;
-            heap_.push({std::max({next_port_free, next_id_gate, seg.gate_cycle}), core_id, ev.segment_idx, ev.axi_id});
-            // idc.queued stays true -- this cursor still has an event pending.
-        } else {
-            idc.queued = false;
-            if (seg.closed) {
-                bool drained = true;
-                for (auto& [id, c] : seg.by_id) {
-                    if (!c.pending.empty()) { drained = false; break; }
-                }
-                if (drained) {
-                    std::vector<Segment>& segs = segments_[core_id];
-                    size_t next_idx = static_cast<size_t>(ev.segment_idx) + 1;
-                    if (next_idx < segs.size() && !segs[next_idx].gate_known) {
-                        segs[next_idx].gate_known = true;
-                        segs[next_idx].gate_cycle = seg.max_complete;
-                        for (auto& [nid, ncur] : segs[next_idx].by_id) {
-                            (void)ncur;
-                            enqueue_if_ready(core_id, static_cast<int>(next_idx), nid);
-                        }
-                    }
-                }
-            }
+        // Admit exactly one chunk per heap turn, then yield: pushing a
+        // continuation (rather than looping through all of this txn's
+        // chunks synchronously) is what lets another core's chunks get a
+        // turn to admit into the same channel queue in between -- without
+        // that, this txn's own chunks would always be the only candidates
+        // FR-FCFS ever sees.
+        if (i + 1 < ip.num_chunks) {
+            heap_.push({ip.issue_cycle, ev.core_id, ev.segment_idx, ev.axi_id, i + 1});
         }
+        // else: every chunk is now admitted (not necessarily dispatched --
+        // some may still be queued). Finalization fires from
+        // route_completed_chunk() once the last of them actually drains,
+        // whenever that happens to be.
     }
 
     compute_summary();
@@ -286,6 +392,7 @@ void Engine::compute_summary() {
 
     uint64_t total_hits = 0, total_conflicts = 0, total_empties = 0;
     uint64_t total_refresh_cycles = 0, total_turnaround_cycles = 0;
+    uint64_t total_bankgroup_reuse = 0;
     for (const auto& ch : channels_) {
         const ChannelStats& cs = ch->stats();
         total_hits += cs.hits;
@@ -293,6 +400,7 @@ void Engine::compute_summary() {
         total_empties += cs.empties;
         total_refresh_cycles += cs.refresh_cycles;
         total_turnaround_cycles += cs.turnaround_cycles;
+        total_bankgroup_reuse += cs.bankgroup_reuse_count;
     }
 
     uint64_t total_cmds = total_hits + total_conflicts + total_empties;
@@ -300,6 +408,7 @@ void Engine::compute_summary() {
         s.page_hit_rate_pct = static_cast<double>(total_hits) / total_cmds * 100.0;
         s.row_conflict_rate_pct = static_cast<double>(total_conflicts) / total_cmds * 100.0;
         s.row_empty_rate_pct = static_cast<double>(total_empties) / total_cmds * 100.0;
+        s.bankgroup_reuse_rate_pct = static_cast<double>(total_bankgroup_reuse) / total_cmds * 100.0;
     }
 
     uint64_t channel_time_budget = static_cast<uint64_t>(channels_.size()) * cum_max_complete_cycle_;

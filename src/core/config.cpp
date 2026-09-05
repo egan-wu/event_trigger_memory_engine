@@ -6,7 +6,9 @@ namespace ddrtiming {
 namespace {
 // Accepts either the ergonomic contiguous form {"bit_start":8,"bit_width":2}
 // or an explicit scattered form {"bits":[14,15,10,11]} (field bit0 <- addr
-// bit14, bit1 <- addr bit15, bit2 <- addr bit10, bit3 <- addr bit11).
+// bit14, bit1 <- addr bit15, bit2 <- addr bit10, bit3 <- addr bit11). Either
+// form may add an optional "hash_start" (int) to XOR-hash the field against
+// physical bits [hash_start, hash_start+width) -- see AddressField::xor_hashed.
 AddressField parse_field(const json::Value& obj, const std::string& key) {
     AddressField f;
     if (!obj.contains(key)) return f;
@@ -19,6 +21,9 @@ AddressField parse_field(const json::Value& obj, const std::string& key) {
         int bit_start = static_cast<int>(v.get_int("bit_start", 0));
         int bit_width = static_cast<int>(v.get_int("bit_width", 0));
         f = AddressField::contiguous(bit_start, bit_width);
+    }
+    if (v.contains("hash_start")) {
+        f = AddressField::xor_hashed(f, static_cast<int>(v.get_int("hash_start", 0)));
     }
     return f;
 }

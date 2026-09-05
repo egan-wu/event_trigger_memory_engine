@@ -31,6 +31,14 @@ struct SummaryStats {
     double row_empty_rate_pct = 0.0;
     double refresh_overhead_pct = 0.0;
     double turnaround_overhead_pct = 0.0;
+    // Fraction of column commands that paid tCCD_L (same bank group as the
+    // immediately preceding command on that channel) instead of tCCD_S
+    // (different bank group, typically zero extra bubble beyond the raw
+    // transfer time -- the entire reason bank groups exist). A sequential
+    // stream whose address mapping puts bank-group bits anywhere but the
+    // fastest-changing position will show this near 100%; see README
+    // "Bank-group ordering".
+    double bankgroup_reuse_rate_pct = 0.0;
 };
 
 // One fixed-size bucket of simulated time (history_window_ns in the config),
@@ -48,6 +56,10 @@ struct WindowStats {
     uint64_t dram_bytes = 0;
     uint64_t txn_count = 0;
     uint64_t hits = 0, conflicts = 0, empties = 0;
+    // Of the commands counted in hits+conflicts+empties above, how many paid
+    // tCCD_L (same bank group as the previous command on their channel)
+    // instead of tCCD_S -- see SummaryStats::bankgroup_reuse_rate_pct.
+    uint64_t bankgroup_reuse_count = 0;
     // High-water mark, across every (core, axi_id) stream active in this
     // window, of that stream's outstanding-request count immediately after a
     // dispatch (sampled at dispatch instants, which is exact: occupancy for a
@@ -87,6 +99,37 @@ struct IdCursor {
     std::deque<AxiTxn> pending;
     std::multiset<uint64_t> outstanding; // completion cycles of this id's in-flight txns
     bool queued = false;
+
+    // Bookkeeping for whichever txn is currently being chunked/dispatched
+    // for this id (only one at a time, matching `queued`'s one-event-per-id
+    // invariant). A txn's chunks are now admitted into their channels one
+    // per heap turn (see Engine::run()), interleaved with other cores'
+    // chunks -- that interleaving is what lets the FR-FCFS channel scheduler
+    // (command_queue.hpp) actually have competing candidates to choose
+    // between, instead of always seeing one stream's commands in isolation.
+    // Dispatch (draining) can then lag admission by an arbitrary number of
+    // other chunks, so this struct accumulates results across however many
+    // separate dispatch events it takes until every one of this txn's own
+    // chunks has actually been serviced.
+    struct InProgress {
+        uint64_t txn_id = 0;
+        int core_id = 0;
+        TxnType type = TxnType::Read;
+        uint64_t addr = 0;
+        uint64_t issue_cycle = 0;
+        uint64_t bytes = 0;        // logical AXI bytes requested (whole txn)
+        uint64_t chunk_bytes = 0;
+        uint64_t first_window_addr = 0;
+        uint32_t num_chunks = 0;
+        uint32_t next_chunk_idx = 0;
+        uint32_t chunks_dispatched = 0;
+        uint64_t max_complete = 0;
+        uint32_t hits = 0, conflicts = 0, empties = 0;
+        RowStatus dominant_row_status = RowStatus::Empty;
+        bool has_window = false;
+        size_t window_index = 0;
+    };
+    InProgress in_progress;
 };
 
 // A run of transactions between two barriers (or log start / "still open")
@@ -154,6 +197,11 @@ private:
         int core_id;
         int segment_idx;
         uint32_t axi_id;
+        // 0 = start this id's next pending txn from scratch; >0 = resume an
+        // already-started txn's chunk admission at this chunk index (see
+        // IdCursor::InProgress). Never affects heap ordering -- only one
+        // event per id is ever in the heap at a time (IdCursor::queued).
+        uint32_t chunk_resume_idx = 0;
         bool operator>(const Event& o) const {
             if (ready_cycle != o.ready_cycle) return ready_cycle > o.ready_cycle;
             if (core_id != o.core_id) return core_id > o.core_id;
@@ -189,6 +237,14 @@ private:
 
     void enqueue_if_ready(int core_id, int segment_idx, uint32_t axi_id);
     void compute_summary();
+
+    // Routes a just-dispatched chunk back to its owning IdCursor::InProgress
+    // (identified by cmd.core_id/segment_idx/axi_id), folding in its
+    // hit/conflict/empty and window stats; finalizes the owning txn once
+    // every one of its chunks has been dispatched.
+    void route_completed_chunk(const DramCommand& done);
+    void finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi_id);
+    bool any_channel_has_pending() const;
 };
 
 } // namespace ddrtiming

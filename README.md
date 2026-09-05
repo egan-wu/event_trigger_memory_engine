@@ -170,6 +170,7 @@ currently retained in `results()` — see the pruning section below.
 | `burst_efficiency_pct` | `total_bytes / total_dram_bytes * 100` — 100% = every burst was fully useful, lower = over-fetch waste; see "Over-fetch" below |
 | `avg_latency_ns` | mean of every transaction's `(complete_cycle − issue_cycle)`, in ns |
 | `page_hit_rate_pct` / `row_conflict_rate_pct` / `row_empty_rate_pct` | classification of every *DRAM column command* (not every transaction — a burst spanning multiple banks/rows contributes multiple classifications); these three sum to 100% |
+| `bankgroup_reuse_rate_pct` | % of column commands that paid `tCCD_L` (same bank group as the immediately preceding command on that channel) instead of `tCCD_S` (different bank group) — see "Bank-group ordering" below |
 | `refresh_overhead_pct` | % of total channel-cycles (`channels × total_cycles`) spent blocked on refresh |
 | `turnaround_overhead_pct` | % of total channel-cycles spent on R↔W bus turnaround |
 
@@ -274,6 +275,40 @@ at identical bandwidth:
   two: a workload can be far below both the bus's bandwidth ceiling and the
   outstanding cap and still serialize badly if it's only ever landing on a
   handful of banks — an address-mapping spread problem, not a timing one.
+- **Bank-group reuse** (`bankgroup_reuse_count`): of the commands dispatched
+  in this window, how many paid `tCCD_L` (same bank group as the immediately
+  preceding command *on that channel*) instead of `tCCD_S` (different bank
+  group). See "Bank-group ordering" below — this is a third, independent
+  failure mode from the two above: a workload can have plenty of bandwidth
+  headroom, a healthy outstanding count, and good bank spread, and still run
+  at a fraction of peak because its address mapping keeps re-hitting the same
+  bank group back to back.
+
+### Bank-group ordering
+
+DDR4/DDR5 splits a rank's banks into bank *groups* specifically so a stream
+of column commands can pay the cheap `tCCD_S` spacing (different group —
+typically equal to the raw burst transfer time itself, i.e. zero bubble)
+instead of the expensive `tCCD_L` spacing (same group — typically ~2x that)
+between consecutive commands on a channel. Getting the *value* of the
+bank-group field right (spreading traffic across groups at all) is necessary
+but not sufficient — the field also has to be the **fastest-changing** bit(s)
+among channel/bank/bankgroup for a sequential stream to actually rotate
+groups every command. Put it anywhere else (e.g. the slowest-changing of the
+interleave bits) and a sequential stream can still spread across every group
+in aggregate over time while paying `tCCD_L` on nearly every single command,
+because it lingers on each group for several consecutive commands before
+moving to the next. This is a real bug this project hit and fixed: moving
+`map_bankgroup` from the high bits of a 5-bit interleave field to the low
+bits, with everything else unchanged, took one workload from 31% to 72% of
+peak bandwidth (12.1%→3.0% row-conflict rate) at the *same* real burst
+granularity — no address-hashing, no burst-size changes, no scheduler
+changes. `bankgroup_reuse_rate_pct` (summary) and `bankgroup_reuse_count`
+(per-window) exist specifically to make this diagnosable in seconds instead
+of by re-deriving the bit arithmetic by hand: a value near 0% means the
+mapping rotates groups properly; a value that's high *and flat* across the
+whole trace (not just in a transient burst) is a structural mapping choice,
+not a passing anomaly.
 
 For a multi-channel config, every field above is an **aggregate across all
 channels** — which hides a real failure mode of its own: "50% overall
@@ -335,6 +370,7 @@ Output shape:
   "summary": {
     "num_windows": 141, "num_channels": 2, "window_ns": 1000000,
     "total_bytes": 123456789, "hit_rate_pct": 96.9, "conflict_rate_pct": 1.2,
+    "bankgroup_reuse_rate_pct": 0.1,
     "metrics": {
       "avg_bandwidth_gbps": {
         "mean": 7.61, "stddev": 3.2,
@@ -342,7 +378,10 @@ Output shape:
         "p75": 10.2, "p95": 14.8, "p99": 16.0, "p100": 17.07
       },
       "outstanding_occupancy_pct": { "mean": 100.0, "...": "..." },
-      "bank_utilization_pct": { "mean": 3.15, "...": "..." }
+      "bank_utilization_pct": { "mean": 3.15, "...": "..." },
+      "conflict_pct": { "mean": 1.2, "...": "..." },
+      "hit_pct": { "mean": 96.9, "...": "..." },
+      "bankgroup_reuse_pct": { "mean": 0.1, "...": "..." }
     },
     "channels": [
       { "index": 0, "avg_bandwidth_gbps": { "mean": 8.53, "...": "..." } },
@@ -403,9 +442,30 @@ Four parts:
   summary-only, not per-bucket — the two traces can have different lengths,
   so aligning their bucket boundaries is left unsolved on purpose.
 
+Every metric above runs through the exact same `summary`/`extremes`/`series`
+machinery, whether it comes straight from a CSV column or is derived on the
+fly:
+
+| metric | source | always present? |
+|---|---|---|
+| `avg_bandwidth_gbps` | CSV column | yes |
+| `outstanding_occupancy_pct` | CSV column | only if the CSV has it |
+| `bank_utilization_pct` | CSV column | only if the CSV has it |
+| `conflict_pct` / `hit_pct` | derived per-window from `hits`/`conflicts`/`empties` | yes |
+| `bankgroup_reuse_pct` | derived per-window from `bankgroup_reuse_count` | only if the CSV has that column |
+
+`conflict_pct`/`hit_pct` exist so a *trend* across the trace — e.g. conflict
+rate climbing across consecutive windows, the signature of a scheduler
+greedily deferring one stream's requests behind another's until deferral
+itself starts manufacturing conflicts — shows up in `series`/`extremes`
+without needing a new engine field; they're arithmetic over columns the CSV
+already has. `bankgroup_reuse_pct` needs the engine-side counter (see
+"Bank-group ordering" above) since a CSV without it simply doesn't carry the
+information.
+
 Like the viewer, it degrades gracefully on an older CSV missing newer columns
-(outstanding/bank/per-channel) — the corresponding metric is just omitted
-from `metrics`/`extremes`/`series` rather than the tool failing.
+(outstanding/bank/bankgroup-reuse/per-channel) — the corresponding metric is
+just omitted from `metrics`/`extremes`/`series` rather than the tool failing.
 
 ## Feeding it from a long-running DMA model (no "end of log")
 

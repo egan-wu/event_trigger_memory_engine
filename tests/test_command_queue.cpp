@@ -4,6 +4,11 @@
 // rolling window, refresh insertion/periodicity, and R/W bus turnaround.
 // Every expected number here is hand-computed and traced in comments so a
 // failure points at exactly which mechanism broke.
+//
+// Each command below is admitted alone (queue otherwise empty) and drained
+// immediately, so FR-FCFS has only one candidate to pick -- these tests
+// exercise the underlying per-command timing math, not the queue's
+// reordering behavior (that's covered separately).
 #include "testing.hpp"
 #include "core/command_queue.hpp"
 #include "core/config.hpp"
@@ -36,6 +41,11 @@ DramCommand make_cmd(TxnType type, uint32_t rank, uint32_t bg, uint32_t bank, ui
     c.bytes = bytes;
     return c;
 }
+
+DramCommand admit_and_drain(ChannelScheduler& sched, const DramCommand& cmd, uint64_t ready_cycle) {
+    sched.try_admit(cmd, ready_cycle);
+    return sched.drain_one();
+}
 } // namespace
 
 DDRTEST(tccd_l_vs_tccd_s_column_spacing) {
@@ -52,24 +62,21 @@ DDRTEST(tccd_l_vs_tccd_s_column_spacing) {
     ChannelScheduler sched(cfg, 0);
 
     // P: (rank0, bg0, bank0), fresh -> Empty. act=0, start=0+tRCD=5, complete=6.
-    auto p = make_cmd(TxnType::Read, 0, 0, 0, 0);
-    sched.schedule(p, 0);
+    auto p = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(p.start_cycle, 5ull);
     DDR_CHECK(p.row_status == RowStatus::Empty);
 
     // Q: (rank0, bg0, bank1) -- same bank group as P, different bank.
     // tCCD_L binds: act = last_col_start(5) + tCCD_L(4) = 9 (beats tRRD_L's
     // own term of 0+6=6 and bus_free's 6). start = 9 + tRCD(5) = 14.
-    auto q = make_cmd(TxnType::Read, 0, 0, 1, 0);
-    sched.schedule(q, 0);
+    auto q = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 1, 0), 0);
     DDR_CHECK_EQ(q.start_cycle, 14ull);
     DDR_CHECK(q.row_status == RowStatus::Empty);
 
     // R: (rank0, bg1, bank0) -- different bank group from Q's last column cmd.
     // tCCD_S binds: act = last_col_start(14) + tCCD_S(2) = 16 (beats
     // tRRD_S's own term of 9+2=11 and bus_free's 15). start = 16+5 = 21.
-    auto r = make_cmd(TxnType::Read, 0, 1, 0, 0);
-    sched.schedule(r, 0);
+    auto r = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 1, 0, 0), 0);
     DDR_CHECK_EQ(r.start_cycle, 21ull);
     DDR_CHECK(r.row_status == RowStatus::Empty);
 }
@@ -87,22 +94,19 @@ DDRTEST(trrd_l_vs_trrd_s_activate_spacing) {
     ChannelScheduler sched(cfg, 0);
 
     // P: (rank0, bg0, bank0) fresh. act=0, start=5, complete=6.
-    auto p = make_cmd(TxnType::Read, 0, 0, 0, 0);
-    sched.schedule(p, 0);
+    auto p = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(p.start_cycle, 5ull);
 
     // R: (rank0, bg1, bank0) -- different bank group from P's last activate.
     // tRRD_S binds: act = P's act(0) + tRRD_S(10) = 10 (beats bus_free's 6
     // and tCCD's 5). start = 10 + 5 = 15.
-    auto r = make_cmd(TxnType::Read, 0, 1, 0, 0);
-    sched.schedule(r, 0);
+    auto r = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 1, 0, 0), 0);
     DDR_CHECK_EQ(r.start_cycle, 15ull);
 
     // S: (rank0, bg1, bank1) -- SAME bank group as R's last activate.
     // tRRD_L binds: act = R's act(10) + tRRD_L(15) = 25 (beats bus_free's 16
     // and tCCD's 15). start = 25 + 5 = 30.
-    auto s = make_cmd(TxnType::Read, 0, 1, 1, 0);
-    sched.schedule(s, 0);
+    auto s = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 1, 1, 0), 0);
     DDR_CHECK_EQ(s.start_cycle, 30ull);
 }
 
@@ -125,15 +129,13 @@ DDRTEST(tfaw_limits_to_four_activates_per_rolling_window) {
 
     uint64_t expected_natural[4] = {0, 6, 12, 18};
     for (int i = 0; i < 4; ++i) {
-        auto c = make_cmd(TxnType::Read, 0, 0, static_cast<uint32_t>(i), 0);
-        sched.schedule(c, 0);
+        auto c = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, static_cast<uint32_t>(i), 0), 0);
         DDR_CHECK_EQ(c.start_cycle, expected_natural[i] + 5); // act + tRCD
     }
 
     // 5th activate: natural would be 24 (18+6), but tFAW forces it to
     // activate#1(0) + tFAW(40) = 40. start = 40 + tRCD(5) = 45.
-    auto c5 = make_cmd(TxnType::Read, 0, 0, 4, 0);
-    sched.schedule(c5, 0);
+    auto c5 = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 4, 0), 0);
     DDR_CHECK_EQ(c5.start_cycle, 45ull);
 }
 
@@ -155,9 +157,7 @@ DDRTEST(refresh_inserted_periodically_and_blocks_for_trfc) {
     // 20+tRFC(8)=28.
     DramCommand last;
     for (int k = 0; k <= 20; ++k) {
-        auto c = make_cmd(TxnType::Read, 0, 0, 0, 0);
-        sched.schedule(c, 0);
-        last = c;
+        last = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     }
     DDR_CHECK_EQ(last.start_cycle, 28ull);
     DDR_CHECK_EQ(sched.stats().refresh_cycles, 8ull);
@@ -167,9 +167,7 @@ DDRTEST(refresh_inserted_periodically_and_blocks_for_trfc) {
     // derivation in the design discussion: complete(cmd_(20+j))=29+j, so
     // earliest for cmd_(20+12)=cmd32 is 29+11=40).
     for (int k = 21; k <= 32; ++k) {
-        auto c = make_cmd(TxnType::Read, 0, 0, 0, 0);
-        sched.schedule(c, 0);
-        last = c;
+        last = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     }
     DDR_CHECK_EQ(last.start_cycle, 48ull); // 40 + tRFC(8)
     DDR_CHECK_EQ(sched.stats().refresh_cycles, 16ull); // two refreshes, 8 each
@@ -186,27 +184,81 @@ DDRTEST(rw_turnaround_only_applied_on_direction_change) {
     ChannelScheduler sched(cfg, 0);
 
     // cmd0: Read, opens the row. start=0, complete=1.
-    auto c0 = make_cmd(TxnType::Read, 0, 0, 0, 0);
-    sched.schedule(c0, 0);
+    auto c0 = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(c0.start_cycle, 0ull);
 
     // cmd1: Write, same row (hit) -- direction change R->W: start =
     // bus_free(1) + rd_wr_turnaround(3) = 4.
-    auto c1 = make_cmd(TxnType::Write, 0, 0, 0, 0);
-    sched.schedule(c1, 0);
+    auto c1 = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(c1.start_cycle, 4ull);
 
     // cmd2: Read, same row -- direction change W->R: start =
     // bus_free(5) + wr_rd_turnaround(5) = 10.
-    auto c2 = make_cmd(TxnType::Read, 0, 0, 0, 0);
-    sched.schedule(c2, 0);
+    auto c2 = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(c2.start_cycle, 10ull);
 
     // cmd3: Read, same row -- SAME direction as cmd2, no turnaround: start =
     // bus_free(11) exactly.
-    auto c3 = make_cmd(TxnType::Read, 0, 0, 0, 0);
-    sched.schedule(c3, 0);
+    auto c3 = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
     DDR_CHECK_EQ(c3.start_cycle, 11ull);
 
     DDR_CHECK_EQ(sched.stats().turnaround_cycles, 8ull); // 3 + 5, cmd3 added none
+}
+
+DDRTEST(fr_fcfs_prefers_a_ready_hit_over_an_older_conflict) {
+    // The whole point of this rewrite: given two candidates sitting in the
+    // queue together, an older command that would need a fresh
+    // activate must NOT block a newer command that's a page-hit against an
+    // already-open row -- the newer one should be serviced first.
+    DdrcConfig cfg = base_config();
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1; cfg.tFAW = 0;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // Open bank0's row 0 first (Empty), so it's the "already-open" row.
+    admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+
+    // Admit an OLDER command that targets bank0 but a DIFFERENT row (would be
+    // a Conflict -- expensive: precharge+activate), then a NEWER command
+    // that targets bank0's SAME open row (a Hit -- cheap), both before
+    // draining either.
+    DramCommand older_conflict = make_cmd(TxnType::Read, 0, 0, 0, /*row=*/1);
+    DramCommand newer_hit = make_cmd(TxnType::Read, 0, 0, 0, /*row=*/0);
+    sched.try_admit(older_conflict, 10);
+    sched.try_admit(newer_hit, 20);
+
+    // FR-FCFS must pick the hit first, even though it arrived later.
+    DramCommand first = sched.drain_one();
+    DDR_CHECK(first.row_status == RowStatus::Hit);
+    DDR_CHECK_EQ(first.addr.row, 0u);
+
+    DramCommand second = sched.drain_one();
+    DDR_CHECK(second.row_status == RowStatus::Conflict);
+    DDR_CHECK_EQ(second.addr.row, 1u);
+}
+
+DDRTEST(fr_fcfs_breaks_ties_by_arrival_order) {
+    // Two candidates with the same priority (both Empty/need-activate,
+    // targeting different never-opened banks) must resolve in admission
+    // order -- the classic FCFS tie-break.
+    DdrcConfig cfg = base_config();
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1; cfg.tFAW = 0;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    DramCommand first_admitted = make_cmd(TxnType::Read, 0, 0, 0, 0);
+    DramCommand second_admitted = make_cmd(TxnType::Read, 0, 0, 1, 0);
+    sched.try_admit(first_admitted, 0);
+    sched.try_admit(second_admitted, 0);
+
+    DramCommand drained_first = sched.drain_one();
+    DDR_CHECK_EQ(drained_first.addr.bank, 0u);
+    DramCommand drained_second = sched.drain_one();
+    DDR_CHECK_EQ(drained_second.addr.bank, 1u);
 }

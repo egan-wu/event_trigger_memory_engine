@@ -10,13 +10,34 @@ namespace ddrtiming {
 // DDRC mapping tables commonly scatter a field across multiple ranges (e.g.
 // bank[1:0] <- addr[15:14], bank[3:2] <- addr[11:10]). `bits[i]` names the
 // physical address bit that supplies field bit `i` (LSB-first); field width is
-// bits.size(). Still gather-only (no XOR-hash interleaving) -- see README.
+// bits.size().
+//
+// `hash_bits` (optional, empty by default) adds real XOR-hash interleaving on
+// top of that gather: if `hash_bits[i] >= 0`, field bit i is additionally
+// XORed against that physical address bit. This is the standard technique
+// real DRAM controllers use to break a workload's accidental periodicity --
+// a pure bit-select mapping decodes two addresses to the same bank/channel/
+// bankgroup whenever they happen to agree on the selected bits, even if that
+// agreement is a structural artifact (e.g. several concurrent streams whose
+// addresses differ only in bits above the mapped range); XORing a
+// higher-order bit into the selection breaks that coincidence without
+// touching the field's width. Leaving `hash_bits` empty reproduces the old
+// gather-only behavior exactly.
 struct AddressField {
     std::vector<int> bits;
+    std::vector<int> hash_bits;
     int width() const { return static_cast<int>(bits.size()); }
     static AddressField contiguous(int start, int width) {
         AddressField f;
         for (int i = 0; i < width; ++i) f.bits.push_back(start + i);
+        return f;
+    }
+    // Returns a copy of `base` with field bit i additionally XORed against
+    // physical bit (hash_start + i), for i in [0, base.width()).
+    static AddressField xor_hashed(const AddressField& base, int hash_start) {
+        AddressField f = base;
+        f.hash_bits.assign(f.bits.size(), -1);
+        for (size_t i = 0; i < f.bits.size(); ++i) f.hash_bits[i] = hash_start + static_cast<int>(i);
         return f;
     }
 };

@@ -42,6 +42,7 @@ struct Row {
     double start_ns = 0.0;
     uint64_t bytes_read = 0, bytes_written = 0, dram_bytes = 0, txn_count = 0;
     uint64_t hits = 0, conflicts = 0, empties = 0;
+    int64_t bankgroup_reuse_count = -1;      // -1 = column absent
     double avg_bandwidth_gbps = 0.0;
     double outstanding_occupancy_pct = -1.0; // -1 = column absent
     double bank_utilization_pct = -1.0;      // -1 = column absent
@@ -94,6 +95,7 @@ std::vector<Row> parse_csv(const std::string& path) {
         r.hits = static_cast<uint64_t>(get("hits"));
         r.conflicts = static_cast<uint64_t>(get("conflicts"));
         r.empties = static_cast<uint64_t>(get("empties"));
+        r.bankgroup_reuse_count = has("bankgroup_reuse_count") ? static_cast<int64_t>(get("bankgroup_reuse_count")) : -1;
         r.avg_bandwidth_gbps = get("avg_bandwidth_gbps");
         r.outstanding_occupancy_pct = has("outstanding_occupancy_pct") ? get("outstanding_occupancy_pct") : -1.0;
         r.bank_utilization_pct = has("bank_utilization_pct") ? get("bank_utilization_pct") : -1.0;
@@ -212,9 +214,10 @@ struct TraceData {
     int num_channels = 0;
     bool has_outstanding = false;
     bool has_bank = false;
+    bool has_bankgroup_reuse = false;
     double window_ns = 0.0; // 0 if undeterminable (fewer than 2 windows)
     uint64_t total_bytes = 0;
-    double hit_rate_pct = 0.0, conflict_rate_pct = 0.0;
+    double hit_rate_pct = 0.0, conflict_rate_pct = 0.0, bankgroup_reuse_rate_pct = 0.0;
     std::vector<std::pair<std::string, std::vector<double>>> base_metrics; // name -> per-window values
     std::vector<std::vector<double>> channel_metrics; // per channel -> per-window avg_bandwidth_gbps
 };
@@ -228,17 +231,33 @@ TraceData load_trace(const std::string& path) {
     t.num_channels = static_cast<int>(t.rows[0].channel_bandwidth_gbps.size());
     t.has_outstanding = t.rows[0].outstanding_occupancy_pct >= 0.0;
     t.has_bank = t.rows[0].bank_utilization_pct >= 0.0;
+    t.has_bankgroup_reuse = t.rows[0].bankgroup_reuse_count >= 0;
     // Real window duration, not the *start* of the last window -- a bucket/
     // extremes entry's end_ns needs this to name the window's actual end.
     t.window_ns = (n >= 2) ? (t.rows[1].start_ns - t.rows[0].start_ns) : 0.0;
 
-    std::vector<double> bw, occ, bank;
+    std::vector<double> bw, occ, bank, conflict_pct, hit_pct, bg_reuse_pct;
     bw.reserve(n);
-    uint64_t total_hits = 0, total_conf = 0, total_emp = 0;
+    conflict_pct.reserve(n);
+    hit_pct.reserve(n);
+    uint64_t total_hits = 0, total_conf = 0, total_emp = 0, total_bg_reuse = 0;
     for (const auto& r : t.rows) {
         bw.push_back(r.avg_bandwidth_gbps);
         if (t.has_outstanding) occ.push_back(std::max(0.0, r.outstanding_occupancy_pct));
         if (t.has_bank) bank.push_back(std::max(0.0, r.bank_utilization_pct));
+        // Per-window hit/conflict rate -- purely derived from existing
+        // hits/conflicts/empties columns, no engine changes needed. Lets the
+        // percentile/bucket/extremes machinery below surface a *trend*
+        // (e.g. conflict rate climbing across consecutive windows) that the
+        // single whole-trace conflict_rate_pct number can't show at all.
+        uint64_t cmds_here = r.hits + r.conflicts + r.empties;
+        conflict_pct.push_back(cmds_here > 0 ? static_cast<double>(r.conflicts) / static_cast<double>(cmds_here) * 100.0 : 0.0);
+        hit_pct.push_back(cmds_here > 0 ? static_cast<double>(r.hits) / static_cast<double>(cmds_here) * 100.0 : 0.0);
+        if (t.has_bankgroup_reuse) {
+            int64_t reuse = std::max<int64_t>(0, r.bankgroup_reuse_count);
+            bg_reuse_pct.push_back(cmds_here > 0 ? static_cast<double>(reuse) / static_cast<double>(cmds_here) * 100.0 : 0.0);
+            total_bg_reuse += static_cast<uint64_t>(reuse);
+        }
         t.total_bytes += r.bytes_read + r.bytes_written;
         total_hits += r.hits; total_conf += r.conflicts; total_emp += r.empties;
     }
@@ -246,11 +265,23 @@ TraceData load_trace(const std::string& path) {
     if (total_cmds > 0) {
         t.hit_rate_pct = static_cast<double>(total_hits) / static_cast<double>(total_cmds) * 100.0;
         t.conflict_rate_pct = static_cast<double>(total_conf) / static_cast<double>(total_cmds) * 100.0;
+        if (t.has_bankgroup_reuse) {
+            t.bankgroup_reuse_rate_pct = static_cast<double>(total_bg_reuse) / static_cast<double>(total_cmds) * 100.0;
+        }
     }
 
     t.base_metrics.emplace_back("avg_bandwidth_gbps", std::move(bw));
     if (t.has_outstanding) t.base_metrics.emplace_back("outstanding_occupancy_pct", std::move(occ));
     if (t.has_bank) t.base_metrics.emplace_back("bank_utilization_pct", std::move(bank));
+    t.base_metrics.emplace_back("conflict_pct", std::move(conflict_pct));
+    t.base_metrics.emplace_back("hit_pct", std::move(hit_pct));
+    // Directly diagnoses the bank-group-ordering class of bug found in this
+    // project's own investigation: a sequential stream whose address
+    // mapping puts bank-group bits anywhere but the fastest-changing
+    // position pays tCCD_L (not tCCD_S) on nearly every command. High and
+    // *flat* (low variance in series/extremes below) = a structural mapping
+    // choice, not a transient -- see README "Bank-group ordering".
+    if (t.has_bankgroup_reuse) t.base_metrics.emplace_back("bankgroup_reuse_pct", std::move(bg_reuse_pct));
 
     t.channel_metrics.resize(static_cast<size_t>(t.num_channels));
     for (int c = 0; c < t.num_channels; ++c) {
@@ -268,6 +299,7 @@ ddrtiming::json::Value build_summary(const TraceData& t) {
     summary.set("total_bytes", static_cast<int64_t>(t.total_bytes));
     summary.set("hit_rate_pct", t.hit_rate_pct);
     summary.set("conflict_rate_pct", t.conflict_rate_pct);
+    if (t.has_bankgroup_reuse) summary.set("bankgroup_reuse_rate_pct", t.bankgroup_reuse_rate_pct);
 
     ddrtiming::json::Value metrics = ddrtiming::json::Value::make_object();
     for (const auto& [name, values] : t.base_metrics) metrics.set(name, metric_summary_stats(values));

@@ -30,6 +30,8 @@ struct DecodedAddr {
 struct DramCommand {
     uint64_t txn_id = 0;
     int core_id = 0;
+    int segment_idx = 0;  // identifies the owning IdCursor alongside core_id/axi_id
+    uint32_t axi_id = 0;  // for routing a completed command back to its stream once dispatched
     TxnType type = TxnType::Read;
     DecodedAddr addr;
     uint32_t bytes = 0;
@@ -40,6 +42,15 @@ struct DramCommand {
     uint64_t start_cycle = 0;
     uint64_t complete_cycle = 0;
     RowStatus row_status = RowStatus::Empty;
+    // True if this command's channel serviced another column command in the
+    // SAME bank group immediately before this one -- i.e. it paid tCCD_L
+    // (same-bank-group spacing, typically ~2x a raw burst's transfer time)
+    // instead of tCCD_S (different bank group, typically == transfer time,
+    // zero bubble). A sequential stream that never rotates bank groups pays
+    // tCCD_L on nearly every command; one whose address mapping puts the
+    // bank-group bits at the fastest-changing position pays tCCD_S on
+    // nearly every command instead -- see README "Bank-group ordering".
+    bool bankgroup_reuse = false;
 };
 
 struct TxnResult {

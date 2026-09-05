@@ -41,6 +41,7 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     summary.set("row_empty_rate_pct", s.row_empty_rate_pct);
     summary.set("refresh_overhead_pct", s.refresh_overhead_pct);
     summary.set("turnaround_overhead_pct", s.turnaround_overhead_pct);
+    summary.set("bankgroup_reuse_rate_pct", s.bankgroup_reuse_rate_pct);
 
     json::Value txns = json::Value::make_array();
     for (const auto& r : engine.results()) {
@@ -80,6 +81,7 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
             wv.set("hits", static_cast<int64_t>(w.hits));
             wv.set("conflicts", static_cast<int64_t>(w.conflicts));
             wv.set("empties", static_cast<int64_t>(w.empties));
+            wv.set("bankgroup_reuse_count", static_cast<int64_t>(w.bankgroup_reuse_count));
             double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
             wv.set("avg_bandwidth_gbps", bw);
             wv.set("outstanding_high_water", static_cast<int64_t>(w.max_outstanding_count));
@@ -134,6 +136,7 @@ std::string format_summary_text(const Engine& engine) {
     os << "Row-empty rate:          " << s.row_empty_rate_pct << " %\n";
     os << "Refresh overhead:        " << s.refresh_overhead_pct << " %\n";
     os << "R/W turnaround overhead: " << s.turnaround_overhead_pct << " %\n";
+    os << "Bank-group reuse rate:   " << s.bankgroup_reuse_rate_pct << " % (tCCD_L instead of tCCD_S)\n";
     return os.str();
 }
 
@@ -152,7 +155,7 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
     int nchannels = std::max(1, engine.config().channels);
 
     f << "window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,"
-         "hits,conflicts,empties,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,"
+         "hits,conflicts,empties,bankgroup_reuse_count,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,"
          "active_bank_count,bank_utilization_pct";
     // Per-channel columns -- lets a viewer distinguish "every channel at 50%"
     // from "one channel maxed, one idle", both invisible in the aggregate above.
@@ -168,7 +171,7 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
         double bank_util_pct = static_cast<double>(active_banks) / total_banks * 100.0;
         f << i << ',' << start_ns << ',' << w.bytes_read << ',' << w.bytes_written << ','
           << w.dram_bytes << ',' << w.txn_count << ',' << w.hits << ',' << w.conflicts << ','
-          << w.empties << ',' << bw << ',' << w.max_outstanding_count << ',' << occ_pct << ','
+          << w.empties << ',' << w.bankgroup_reuse_count << ',' << bw << ',' << w.max_outstanding_count << ',' << occ_pct << ','
           << active_banks << ',' << bank_util_pct;
         for (int ch = 0; ch < nchannels; ++ch) {
             uint64_t ch_bytes = (static_cast<size_t>(ch) < w.dram_bytes_per_channel.size()) ? w.dram_bytes_per_channel[ch] : 0;
