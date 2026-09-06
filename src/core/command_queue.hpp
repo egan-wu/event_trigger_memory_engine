@@ -100,6 +100,13 @@ private:
     uint32_t last_col_bankgroup_ = 0;
     bool had_col_cmd_ = false;
 
+    // tWTR (write-to-read, same rank) tracking: the last WRITE's data-burst
+    // completion and bank group, channel-wide -- same granularity as
+    // last_col_bankgroup_/last_bus_type_ above.
+    uint64_t last_write_complete_cycle_ = 0;
+    uint32_t last_write_bankgroup_ = 0;
+    bool had_write_cmd_ = false;
+
     ChannelStats stats_;
 
     struct PendingCmd {
@@ -120,7 +127,7 @@ private:
     int peek_priority(const DramCommand& cmd) const; // 0=hit, 1=idle/never-opened bank, 2=conflict
     uint64_t bank_key_of(const DramCommand& cmd) const;
     size_t pick_best_index() const;
-    uint64_t apply_refresh_if_due(RankState& rk, uint64_t earliest_cycle);
+    uint64_t apply_refresh_if_due(uint32_t rank_idx, uint64_t earliest_cycle);
     uint64_t apply_activate_gating(RankState& rk, uint32_t bankgroup, uint64_t cycle);
 };
 

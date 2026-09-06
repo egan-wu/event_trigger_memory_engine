@@ -52,6 +52,7 @@ DDRTEST(tccd_l_vs_tccd_s_column_spacing) {
     // tCCD_L (same bank group) must be strictly larger-gap-enforcing than
     // tCCD_S (different bank group) when it's the binding constraint.
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
     cfg.tCCD_S = 2; cfg.tCCD_L = 4;
     cfg.tRRD_S = 2; cfg.tRRD_L = 6; // smaller than what tCCD will demand below
@@ -84,6 +85,7 @@ DDRTEST(tccd_l_vs_tccd_s_column_spacing) {
 DDRTEST(trrd_l_vs_trrd_s_activate_spacing) {
     // Isolate tRRD by making tCCD negligible (0) so it never wins the max().
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
     cfg.tCCD_S = 0; cfg.tCCD_L = 0;
     cfg.tRRD_S = 10; cfg.tRRD_L = 15;
@@ -117,6 +119,7 @@ DDRTEST(tfaw_limits_to_four_activates_per_rolling_window) {
     // activates land at 0, 6, 12, 18 -- within tFAW(40) of each other. The
     // fifth must wait until activate #1 + tFAW = 40, not the natural 24.
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.banks_per_group = 5;
     cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
     cfg.tCCD_S = 0; cfg.tCCD_L = 0;
@@ -144,6 +147,7 @@ DDRTEST(refresh_inserted_periodically_and_blocks_for_trfc) {
     // /tRTP/tWR/tCCD/tRRD/tFAW all zeroed so the only thing perturbing the
     // otherwise-1-cycle-per-command cadence is refresh. tREFI=20, tRFC=8.
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 0; cfg.tRP = 0; cfg.tRAS = 0; cfg.tRC = 0;
     cfg.tCCD_S = 0; cfg.tCCD_L = 0; cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 0;
     cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
@@ -175,6 +179,7 @@ DDRTEST(refresh_inserted_periodically_and_blocks_for_trfc) {
 
 DDRTEST(rw_turnaround_only_applied_on_direction_change) {
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 0; cfg.tRP = 0; cfg.tRAS = 0; cfg.tRC = 0;
     cfg.tCCD_S = 0; cfg.tCCD_L = 0; cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 0;
     cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
@@ -211,6 +216,7 @@ DDRTEST(fr_fcfs_prefers_a_ready_hit_over_an_older_conflict) {
     // activate must NOT block a newer command that's a page-hit against an
     // already-open row -- the newer one should be serviced first.
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
     cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1; cfg.tFAW = 0;
     cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
@@ -240,11 +246,205 @@ DDRTEST(fr_fcfs_prefers_a_ready_hit_over_an_older_conflict) {
     DDR_CHECK_EQ(second.addr.row, 1u);
 }
 
+DDRTEST(column_spacing_on_page_hits_is_tccd_not_trtp) {
+    // tRTP/tWR are read/write-to-PRECHARGE constraints, not next-column
+    // constraints -- a page hit's next column command is spaced by
+    // tCCD_S/tCCD_L alone. tRTP(12)/tWR(20) are deliberately set much larger
+    // than tCCD_L(4) here so a leftover coupling to them would be obvious.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 2; cfg.tCCD_L = 4;
+    cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000; // won't bind
+    cfg.tRTP = 12; cfg.tWR = 20;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: fresh bank -> Empty. act=0, start=0+tRCD(5)=5, complete=6.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+    DDR_CHECK(a.row_status == RowStatus::Empty);
+
+    // B: same bank, same row -> Hit. tCCD_L binds: start = 5 + 4 = 9.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(b.start_cycle, 9ull);
+    DDR_CHECK(b.row_status == RowStatus::Hit);
+
+    // C: same -> Hit. start = 9 + 4 = 13.
+    auto c = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(c.start_cycle, 13ull);
+    DDR_CHECK(c.row_status == RowStatus::Hit);
+}
+
+DDRTEST(write_page_hits_are_not_gated_by_twr) {
+    // Same as above but all WRITEs, to confirm tWR (write-recovery-before-
+    // PRECHARGE) doesn't leak into next-column spacing either.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 2; cfg.tCCD_L = 4;
+    cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000;
+    cfg.tRTP = 12; cfg.tWR = 20;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(b.start_cycle, 9ull);
+    auto c = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(c.start_cycle, 13ull);
+}
+
+DDRTEST(cas_latency_delays_data_but_not_command_spacing) {
+    // tCL/tCWL are pipeline latency from column command to data, not a
+    // throughput limit: they must delay complete_cycle but never leak into
+    // command-issue spacing (tCCD), which stays anchored to col_start.
+    DdrcConfig cfg = base_config();
+    cfg.tRCD = 5; cfg.tCL = 10; cfg.tCWL = 8; cfg.tCCD_L = 4; cfg.tCCD_S = 2;
+    cfg.tRP = 0; cfg.tRAS = 0; cfg.tRC = 0; cfg.tRRD_S = 0; cfg.tRRD_L = 0;
+    cfg.tFAW = 0; cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: fresh bank -> Empty. start = 0 + tRCD(5) = 5.
+    // complete = start(5) + tCL(10) + transfer(1) = 16.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+    DDR_CHECK_EQ(a.complete_cycle, 16ull);
+
+    // B: same bank, same row -> Hit. tCCD_L binds: start = 5 + 4 = 9 -- NOT
+    // gated by A's complete_cycle(16) in any way; that's the whole point of
+    // this test (a naive implementation would leak data-return latency into
+    // command spacing and turn a latency bug into a throughput bug).
+    // complete = 9 + tCL(10) + 1 = 20.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(b.start_cycle, 9ull);
+    DDR_CHECK_EQ(b.complete_cycle, 20ull);
+}
+
+DDRTEST(trtp_still_delays_precharge_on_row_conflict) {
+    // Guard against over-correcting FIX 1: tRTP must still delay the
+    // PRECHARGE that a row conflict requires. This test's expectation is
+    // unchanged by the FIX 1 rework -- it must pass both before and after.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 2; cfg.tCCD_L = 4;
+    cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000;
+    cfg.tRTP = 12; cfg.tWR = 20;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: (bank0, row0) fresh -> Empty. start=5, complete=6.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+
+    // B: (bank0, row1) -- Conflict. Precharge can't start before
+    // col_start(5) + tRTP(12) = 17 (beats row_opened_at(0) + tRAS(10) = 10).
+    // act_start = 17 + tRP(5) = 22. start = 22 + tRCD(5) = 27.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 1), 0);
+    DDR_CHECK_EQ(b.start_cycle, 27ull);
+    DDR_CHECK(b.row_status == RowStatus::Conflict);
+}
+
+DDRTEST(twtr_delays_read_after_write_beyond_bus_turnaround) {
+    // tWTR is a separate, additive DRAM-internal constraint on top of the
+    // bus-direction turnaround: after a write's data burst ends, a
+    // same-rank read must wait tWTR_L (same bank group) / tWTR_S (different
+    // bank group), measured from the write's complete_cycle (end of its
+    // data burst), not its col_start.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tRCD = 5; cfg.tCCD_L = 2; cfg.tCCD_S = 2;
+    cfg.tWTR_L = 10; cfg.tWTR_S = 4;
+    cfg.wr_rd_turnaround = 1; cfg.rd_wr_turnaround = 0;
+    cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tRP = 0; cfg.tRAS = 0; cfg.tRC = 0;
+    cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: WRITE (bg0, bank0, row0) -> Empty. start = 0 + tRCD(5) = 5,
+    // complete = 5 + tCWL(0) + transfer(1) = 6.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+    DDR_CHECK_EQ(a.complete_cycle, 6ull);
+
+    // B: READ (bg0, bank0, row0) -> Hit, same bank group as the write.
+    // Competing floors: tCCD_L -> 5+2=7; bus turnaround -> bus_free(6)+
+    // wr_rd_turnaround(1)=7; tWTR_L -> write complete(6)+10=16. tWTR_L wins.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(b.start_cycle, 16ull);
+}
+
+DDRTEST(twtr_uses_the_short_bound_across_bank_groups) {
+    // Same setup, but the read targets a DIFFERENT bank group than the
+    // write -- tWTR_S(4) applies instead of tWTR_L(10).
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tRCD = 5; cfg.tCCD_L = 2; cfg.tCCD_S = 2;
+    cfg.tWTR_L = 10; cfg.tWTR_S = 4;
+    cfg.wr_rd_turnaround = 1; cfg.rd_wr_turnaround = 0;
+    cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tRP = 0; cfg.tRAS = 0; cfg.tRC = 0;
+    cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: WRITE (bg0, bank0, row0) -> Empty. start=5, complete=6.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Write, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+
+    // B: READ (bg1, bank0, row0) -- different bank group, never-opened bank
+    // -> Empty. Competing floors: tCCD_S -> last_col_start(5)+2=7; bus
+    // turnaround -> bus_free(6)+1=7; tWTR_S -> write complete(6)+4=10.
+    // tWTR_S wins: act_start=10, start = 10 + tRCD(5) = 15.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 1, 0, 0), 0);
+    DDR_CHECK_EQ(b.start_cycle, 15ull);
+    DDR_CHECK(b.row_status == RowStatus::Empty);
+}
+
+DDRTEST(refresh_closes_open_rows) {
+    // Real REFRESH requires all banks precharged, so every row in that rank
+    // must close afterwards -- otherwise the next access is misreported as
+    // a page hit when it's really an Empty (fresh activate).
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tREFI = 100; cfg.tRFC = 20;
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 1; cfg.tRC = 0;
+    cfg.tCCD_S = 0; cfg.tCCD_L = 0; cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 1000;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A: Read (bank0, row0) at ready_cycle 0 -> Empty. start = 0+tRCD(5) = 5.
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull);
+    DDR_CHECK(a.row_status == RowStatus::Empty);
+
+    // B: Read (bank0, row0 again) at ready_cycle 150. A refresh came due at
+    // 100 and ended at 120; 150 is past it so nothing blocks B's earliest --
+    // but that refresh closed the row, so this must be Empty, not Hit:
+    // start = 150 + tRCD(5) = 155.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 150);
+    DDR_CHECK_EQ(b.start_cycle, 155ull);
+    DDR_CHECK(b.row_status == RowStatus::Empty);
+}
+
 DDRTEST(fr_fcfs_breaks_ties_by_arrival_order) {
     // Two candidates with the same priority (both Empty/need-activate,
     // targeting different never-opened banks) must resolve in admission
     // order -- the classic FCFS tie-break.
     DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0; // isolate this test from FIX 2's CAS latency
     cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
     cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1; cfg.tFAW = 0;
     cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;

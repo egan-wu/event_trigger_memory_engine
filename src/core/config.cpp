@@ -61,6 +61,8 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.tRP = tm.get_num("tRP", cfg.tRP);
         cfg.tRAS = tm.get_num("tRAS", cfg.tRAS);
         cfg.tRC = tm.get_num("tRC", cfg.tRC);
+        cfg.tCL = tm.get_num("tCL", cfg.tCL);
+        cfg.tCWL = tm.get_num("tCWL", cfg.tCWL);
         cfg.tCCD_S = tm.get_num("tCCD_S", cfg.tCCD_S);
         cfg.tCCD_L = tm.get_num("tCCD_L", cfg.tCCD_L);
         cfg.tRRD_S = tm.get_num("tRRD_S", cfg.tRRD_S);
