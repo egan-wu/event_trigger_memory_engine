@@ -85,6 +85,8 @@ struct DdrcConfig {
     // only: validate() rejects tRC < tRAS + tRP, since by definition tRC is
     // that sum, and a mismatch means one of the three values is a typo.
     double tRC = 45.75;
+    double tCL = 13.75;    // CAS latency: column command to first read data
+    double tCWL = 12.5;    // CAS write latency: column command to first write data
     double tCCD_S = 2.5;   // different bank group
     double tCCD_L = 3.75;  // same bank group
     double tRRD_S = 2.5;
