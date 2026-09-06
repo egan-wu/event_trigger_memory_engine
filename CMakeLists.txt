@@ -45,6 +45,7 @@ add_executable(ddrtiming_tests
     tests/test_command_queue.cpp
     tests/test_engine_stress.cpp
     tests/test_concurrency.cpp
+    tests/test_config_validation.cpp
 )
 target_include_directories(ddrtiming_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 find_package(Threads REQUIRED)

@@ -59,6 +59,13 @@ struct DdrcConfig {
     // pick the beat count that reproduces its actual minimum access
     // granularity for your part).
     int burst_beats = 8;
+    // Despite the name, this is the effective data rate in MT/s (e.g. 1600
+    // for a DDR4-1600 part), not the DRAM core clock frequency -- DDR
+    // transfers on both clock edges, so the real core clock driving a
+    // DDR4-1600 device is 800 MHz, half this value. clock_period_ns() and
+    // peak_bandwidth_gbps() below are both written against that
+    // MT/s-as-MHz convention, and 1600/8 reproduces DDR4-1600's real 12.8
+    // GB/s peak, confirming the field is the transfer rate, not the clock.
     double clock_mhz = 1600.0;
 
     // address mapping (gather-list bit fields, contiguous or scattered; see AddressField)
@@ -72,6 +79,11 @@ struct DdrcConfig {
     double tRCD = 13.75;
     double tRP = 13.75;
     double tRAS = 32.0;
+    // Not read by the scheduler -- ACT-to-ACT spacing for the same bank
+    // falls out implicitly from tRAS + tRP (see ChannelScheduler::drain_one
+    // in command_queue.cpp). Kept as a config-time consistency constraint
+    // only: validate() rejects tRC < tRAS + tRP, since by definition tRC is
+    // that sum, and a mismatch means one of the three values is a typo.
     double tRC = 45.75;
     double tCCD_S = 2.5;   // different bank group
     double tCCD_L = 3.75;  // same bank group
@@ -124,6 +136,14 @@ struct DdrcConfig {
     int total_banks() const {
         return std::max(1, channels) * std::max(1, ranks_per_channel) * std::max(1, bankgroups) * std::max(1, banks_per_group);
     }
+
+    // Rejects physically/definitionally impossible configs (bit overlaps,
+    // width/topology mismatches, non-power-of-two counts, inverted timing
+    // relationships, unsupported enums) by throwing std::runtime_error with
+    // a message naming the offending field(s) and their actual values.
+    // Called automatically at the end of load_from_file(); construct-and-set
+    // call sites (e.g. tests) opt in by calling it explicitly.
+    void validate() const;
 
     static DdrcConfig load_from_file(const std::string& path);
 };

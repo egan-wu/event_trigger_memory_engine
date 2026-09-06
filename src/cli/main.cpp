@@ -12,8 +12,11 @@ namespace {
 void print_usage() {
     std::cout << "Usage: ddrtiming_cli --config <ddrc_config.json> --log <core0_axi.csv> "
                  "[--log <core1_axi.csv> ...] [--out <report.json>] [--windowed-csv <history.csv>]\n"
+                 "       ddrtiming_cli --config <ddrc_config.json> --validate-only\n"
                  "Each --log is assigned core_id = its position (0, 1, 2, ...).\n"
-                 "--windowed-csv requires \"reporting\": {\"history_window_ns\": N} in the config.\n";
+                 "--windowed-csv requires \"reporting\": {\"history_window_ns\": N} in the config.\n"
+                 "--validate-only loads and validates the config, then exits without --log or "
+                 "running a simulation -- useful for quickly checking a config is well-formed.\n";
 }
 } // namespace
 
@@ -22,6 +25,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> log_paths;
     std::string out_path;
     std::string windowed_csv_path;
+    bool validate_only = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -36,13 +40,26 @@ int main(int argc, char** argv) {
         else if (arg == "--log") log_paths.push_back(need_value("--log"));
         else if (arg == "--out") out_path = need_value("--out");
         else if (arg == "--windowed-csv") windowed_csv_path = need_value("--windowed-csv");
+        else if (arg == "--validate-only") validate_only = true;
         else if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
         else { std::cerr << "unknown argument: " << arg << "\n"; print_usage(); return 1; }
     }
 
-    if (config_path.empty() || log_paths.empty()) {
+    if (config_path.empty() || (!validate_only && log_paths.empty())) {
         print_usage();
         return 1;
+    }
+
+    if (validate_only) {
+        try {
+            ddrtiming::DdrcConfig cfg = ddrtiming::DdrcConfig::load_from_file(config_path);
+            (void)cfg;
+        } catch (const std::exception& e) {
+            std::cerr << "error: " << e.what() << "\n";
+            return 1;
+        }
+        std::cout << "OK: " << config_path << " is a valid configuration\n";
+        return 0;
     }
 
     try {
