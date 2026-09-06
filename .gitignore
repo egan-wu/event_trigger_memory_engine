@@ -1,3 +1,11 @@
 build*/
 *.json
 !examples/*.json
+# bench corpus configs + goldens are deliberately tracked
+!bench/**/*.json
+
+# Local planning workspace (not for upload)
+plan/
+
+# Sub-agent worktrees (harness scratch, never commit)
+.claude/worktrees/
