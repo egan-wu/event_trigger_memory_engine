@@ -1,0 +1,53 @@
+{
+  "topology": {
+    "channels": 1,
+    "ranks_per_channel": 1,
+    "bankgroups": 4,
+    "banks_per_group": 4,
+    "rows": 65536,
+    "columns": 1024,
+    "data_bus_bytes": 8,
+    "clock_mhz": 3200
+  },
+  "address_mapping": {
+    "row": {
+      "bit_start": 11,
+      "bit_width": 16
+    },
+    "bankgroup": {
+      "bit_start": 27,
+      "bit_width": 2
+    },
+    "bank": {
+      "bit_start": 29,
+      "bit_width": 2
+    }
+  },
+  "timing_ns": {
+    "tRCD": 13.75,
+    "tRP": 13.75,
+    "tRAS": 32.0,
+    "tRC": 45.75,
+    "tCCD_S": 2.5,
+    "tCCD_L": 5.0,
+    "tRRD_S": 2.5,
+    "tRRD_L": 4.9,
+    "tFAW": 21.0,
+    "tWTR_S": 2.5,
+    "tWTR_L": 7.5,
+    "tRTP": 7.5,
+    "tWR": 15.0,
+    "tREFI": 7800.0,
+    "tRFC": 350.0,
+    "rd_wr_turnaround": 2.5,
+    "wr_rd_turnaround": 2.5
+  },
+  "ddrc_resources": {
+    "command_queue_depth": 32,
+    "max_outstanding_per_id": 8,
+    "scheduling_policy": "fr_fcfs"
+  },
+  "reporting": {
+    "history_window_ns": 1000.0
+  }
+}

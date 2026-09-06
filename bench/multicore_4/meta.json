@@ -1,0 +1,31 @@
+{
+  "name": "multicore_4",
+  "purpose": "Cross-stream command-queue/channel-arbitration competition, isolated from bank conflicts.",
+  "description": [
+    "4 cores (core0.csv..core3.csv), 2000 sequential 64-byte AR transactions each, one AXI id (0) per core, all targeting the SAME single channel.",
+    "Base address for core i is i * 2^29 (0x00000000, 0x20000000, 0x40000000, 0x60000000). Bit 29 is the LSB of the 2-bit bank field in this config's mapping (bank bits [29:30]), and offsetting by exactly one bank-field step while leaving every bit below 29 identical means each core's stream lands in its own distinct bank (0,1,2,3) with the SAME bankgroup (0) -- so the 4 streams never fight over the same row/bank the way strided or a naive multi-core split might. What they DO fight over is the single channel's shared column-command spacing: command_queue.cpp enforces tCCD_S/tCCD_L spacing between the LAST column command issued on the channel and the next one, regardless of which bank either targets -- so this workload isolates that shared-channel arbitration contention from bank-level contention.",
+    "Compare directly against seq_read: same per-stream address cadence (32 accesses per row, bankgroup-reuse near 100%) and same hit/conflict/empty rates, but 4x the concurrent banks in flight -- bandwidth_utilization_pct should be (and is) substantially higher than seq_read's single-stream number, without touching the row-buffer statistics at all."
+  ],
+  "generator": "bench/generate_workloads.py:gen_multicore_4",
+  "deterministic": true,
+  "rng": "none -- pure arithmetic sequence, no randomness",
+  "transaction_count": 8000,
+  "transaction_count_per_core": 2000,
+  "history_window_ns": 500.0,
+  "observed_windows": 98,
+  "observed_headline_metrics": {
+    "sim_time_ns": 48977.5,
+    "avg_dram_bandwidth_gbps": 10.4538,
+    "avg_latency_ns": 195.388,
+    "bandwidth_utilization_pct": 40.8351,
+    "page_hit_rate_pct": 96.85,
+    "row_conflict_rate_pct": 3.1,
+    "row_empty_rate_pct": 0.05,
+    "bankgroup_reuse_rate_pct": 99.9875
+  },
+  "sanity_checks": [
+    "hits+conflicts+empties = 96.85+3.1+0.05 = 100.0 -- OK",
+    "bandwidth_utilization_pct (40.8%) higher than seq_read's single-stream 29.8%, as expected from 4-way bank parallelism -- but nowhere near 4x, which is the shared-channel column-command spacing (tCCD_L, since bankgroup still barely rotates) this workload is built to expose",
+    "row_empty_rate_pct (0.05% = 4/8000) matches exactly 'one empty per core's first access to its own bank' -- confirms the 4 streams really did land in 4 distinct banks rather than colliding"
+  ]
+}

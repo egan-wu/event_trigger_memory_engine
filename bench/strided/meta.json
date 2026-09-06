@@ -1,0 +1,30 @@
+{
+  "name": "strided",
+  "purpose": "Pathological address-mapping case: a stride that forces a row conflict on every single access, in a single bank (no cross-bank parallelism to hide it).",
+  "description": [
+    "6000 AR (read) transactions on one core, one AXI id (0), 64 bytes each, addresses spaced by exactly one row's byte span (addr_i = base + i*2048), base = 0x30000000.",
+    "STRIDE ARITHMETIC (derived from src/core/address_decoder.cpp and this workload's config.json, not guessed): AddressDecoder::decode() extracts each field by gathering the physical address bits named in that field's AddressField (address_decoder.cpp extract(), bit i of the field <- physical bit f.bits[i]). This config's address_mapping sets \"row\": {\"bit_start\": 11, \"bit_width\": 16} (config.json, matching examples/ddrc_config.example.json), i.e. the row field's bit 0 is physical address bit 11, bit 1 is bit 12, etc. -- so the row field's value is exactly floor(addr / 2^11) restricted to those 16 bits: incrementing addr by 2^11 = 2048 bytes increments the row index by exactly 1, and does not touch any bit below 11 (which is the informational column/byte-offset, decode()'s d.col) or any bit at/above 27 (bankgroup starts at bit 27, bank at bit 29) as long as the row field itself doesn't overflow its 16 bits (2^16 = 65536 possible rows -- this workload only advances 6000 of them, so it never rolls into bankgroup). So a stride of exactly 2^11 = 2048 bytes lands every single access in a brand-new row of the SAME bank/bankgroup/channel/rank: a guaranteed row conflict, never a hit, and -- unlike rand_read -- deterministically so on every access, not just on average.",
+    "This is a harder case than rand_read for two reasons: rand_read at least spreads across all 16 banks (so 16 rows can stay 'open' concurrently, one per bank), while strided pins every access to the exact same bank -- fully serializing on that one bank's precharge/activate/CAS cycle with zero cross-bank parallelism. Confirmed by the numbers: strided's bandwidth_utilization_pct (5.2%) is lower than rand_read's (7.6%) despite both having ~100% row-conflict rate."
+  ],
+  "generator": "bench/generate_workloads.py:gen_strided",
+  "deterministic": true,
+  "rng": "none -- pure arithmetic sequence, no randomness",
+  "transaction_count": 6000,
+  "history_window_ns": 2900.0,
+  "observed_windows": 99,
+  "observed_headline_metrics": {
+    "sim_time_ns": 286830,
+    "avg_dram_bandwidth_gbps": 1.33877,
+    "avg_latency_ns": 382.225,
+    "bandwidth_utilization_pct": 5.22957,
+    "page_hit_rate_pct": 0.0,
+    "row_conflict_rate_pct": 99.9833,
+    "row_empty_rate_pct": 0.0166667,
+    "bankgroup_reuse_rate_pct": 99.9833
+  },
+  "sanity_checks": [
+    "hits+conflicts+empties = 0+99.9833+0.0166667 = 100.0 -- OK",
+    "row_empty_rate_pct (0.0167% = 1/6000) matches exactly 'one empty on the very first access, before any bank has an open row' -- confirms the stride really does stay in a single bank the whole run",
+    "row_conflict_rate_pct at 99.98% (not 100%) is exactly accounted for by that one empty -- OK, not an anomaly"
+  ]
+}

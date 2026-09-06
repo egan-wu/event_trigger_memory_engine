@@ -37,6 +37,11 @@ target_link_libraries(daemon_demo PRIVATE ddrtiming)
 add_executable(windowed_history_analyze tools/windowed_history_analyze.cpp)
 target_link_libraries(windowed_history_analyze PRIVATE ddrtiming)
 
+# bench/ regression harness -- see bench/README.md and golden_check.cpp's
+# own header comment for what this checks and why.
+add_executable(golden_check tools/golden_check.cpp)
+target_link_libraries(golden_check PRIVATE ddrtiming)
+
 enable_testing()
 add_executable(ddrtiming_tests
     tests/test_main.cpp
@@ -62,3 +67,10 @@ add_test(NAME windowed_history_analyze_baseline_smoke
                  --baseline ${CMAKE_CURRENT_SOURCE_DIR}/examples/windowed_history_imbalance.example.csv)
 set_tests_properties(windowed_history_analyze_baseline_smoke PROPERTIES
     PASS_REGULAR_EXPRESSION "baseline_delta")
+
+# bench/ golden-snapshot regression check -- see bench/README.md. Goldens
+# currently capture known-incorrect timing-model behavior on purpose (see
+# that README's warning); this test's job is to catch *unintended* drift
+# between runs, not to assert the numbers are physically correct.
+add_test(NAME golden_check
+         COMMAND golden_check --bench-root ${CMAKE_CURRENT_SOURCE_DIR}/bench)

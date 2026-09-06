@@ -1,0 +1,37 @@
+{
+  "name": "bursty",
+  "purpose": "Windowed-history time-axis correctness: a workload whose activity is genuinely concentrated in some simulated-time windows and absent from others, so a caller can tell whether the windowed bucketing (Engine::windows(), src/core/report.cpp) is actually indexing by simulated time correctly rather than just by dispatch order.",
+  "why_this_is_hard_to_construct": [
+    "The engine has no timestamps in its input (README.md 'The core assumption') -- it always issues a transaction as early as physically possible given (a) its own AXI-id's outstanding cap, (b) its core's one-command-per-cycle dispatch port, and (c) BARRIER gates. There is no direct way to say 'wait N ns and do nothing'. A BARRIER only forces the next segment to wait for the PRIOR segment's full drain (engine.hpp Segment::gate_cycle = prior segment's max_complete) -- it does not, by itself, create a visible gap in issue-time unless that prior segment's completion genuinely lags far behind its own issuance.",
+    "A first attempt (40 barrier-separated phases of 150 plain sequential reads, default max_outstanding_per_id=8) produced ZERO empty windows: with a high page-hit rate, each phase's last completion trails its last issue by only a few dozen cycles, so the barrier gate barely moved anything.",
+    "This workload's config.json therefore raises max_outstanding_per_id to 200 (per-workload override, not shared with the other configs) -- comfortably above per_phase (150) -- so a whole burst's outstanding cap never gates issuance; every transaction in a burst admits back-to-back at the engine's minimum issue spacing (engine.cpp kMinIssueSpacingCycles = 1 cycle/txn). Combined with striding each burst by one row's span within a single bank (same 2048-byte arithmetic as bench/strided/meta.json -- guarantees a row conflict on every access, fully serialized on one bank with no cross-bank parallelism to speed it up), a 150-transaction burst now ISSUES in about 150 cycles (~47 ns) but takes roughly 150 * (tRP+tRCD+tRAS-ish serialization) to actually DRAIN -- several thousand ns. The next BARRIER then holds the following burst's first issue at that much-later drain time, leaving a real multi-window gap with zero dispatched bytes in between."
+  ],
+  "structure": "40 phases x 150 AR (read) transactions, one AXI id (0), 64 bytes each, stride = 2048B (one row) within each phase; base address offset by phase*stride*per_phase so phases don't overlap each other's rows; one BARRIER between phases.",
+  "generator": "bench/generate_workloads.py:gen_bursty",
+  "deterministic": true,
+  "rng": "none -- pure arithmetic sequence, no randomness",
+  "transaction_count": 6000,
+  "config_deviation": "max_outstanding_per_id = 200 (vs 8 everywhere else) -- see why_this_is_hard_to_construct above; this is the one bench config that intentionally differs on a ddrc_resources field, not just history_window_ns.",
+  "history_window_ns": 3000.0,
+  "observed_windows": 94,
+  "observed_headline_metrics": {
+    "sim_time_ns": 286830,
+    "avg_dram_bandwidth_gbps": 1.33877,
+    "avg_latency_ns": 3595.28,
+    "bandwidth_utilization_pct": 5.22957,
+    "page_hit_rate_pct": 0.0,
+    "row_conflict_rate_pct": 99.9833,
+    "row_empty_rate_pct": 0.0166667,
+    "bankgroup_reuse_rate_pct": 99.9833
+  },
+  "observed_window_shape": {
+    "zero_activity_windows": 52,
+    "of_total_windows": 94,
+    "note": "txn_count per window alternates almost exactly [150, 0] with an occasional split window ([68, 82]) where a burst straddles a window boundary -- confirms the windowed CSV is bucketing by simulated issue time, not just replaying dispatch order 1:1 into fixed-size chunks."
+  },
+  "sanity_checks": [
+    "summary-level hit/conflict/empty rates are identical to strided (0/99.98/0.017), as expected -- this workload reuses the same single-bank-conflict address pattern, just chopped into barrier-separated bursts",
+    "avg_latency_ns (3595 ns) is over 50x seq_read's despite an identical avg_dram_bandwidth_gbps to strided (1.34 GB/s) -- this is exactly the intended effect: transactions issue almost instantly within a burst but sit waiting a long time to actually complete, which is what latency (issue-to-complete) measures and bandwidth (bytes/sim_time) does not",
+    "bandwidth_utilization_pct and total sim_time_ns are identical to strided's -- expected, since bursty uses the exact same conflict pattern; only the ISSUE-time distribution differs (this is deliberate: it isolates the windowing/time-axis question from the underlying timing-model numbers, which bursty and strided share)"
+  ]
+}

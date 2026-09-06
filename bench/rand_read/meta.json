@@ -1,0 +1,35 @@
+{
+  "name": "rand_read",
+  "purpose": "Row-conflict lower bound: uniformly random addresses across the full mapped address space.",
+  "description": [
+    "8000 AR (read) transactions on one core, one AXI id (0), 64 bytes each, addresses drawn uniformly from [0, 2^31) and aligned down to a 64-byte boundary.",
+    "2^31 bytes is the full span reachable by this config's row/bankgroup/bank mapping (row bits [11:26], bankgroup [27:28], bank [29:30] -- 31 bits total, i.e. addr bits 0..30), so a uniform draw over that range spreads roughly evenly across all 16 banks (4 bankgroups x 4 banks) and, within a bank, essentially never repeats the same row twice in a row (1-in-65536 chance) -- almost every access should be a row conflict, and the very first access to each bank should be the only 'empty'."
+  ],
+  "generator": "bench/generate_workloads.py:gen_rand_read",
+  "deterministic": true,
+  "rng": {
+    "algorithm": "64-bit LCG, Knuth/MMIX constants: state' = (6364136223846793005*state + 1442695040888963407) mod 2**64",
+    "seed": "0x5EED1234 (24274996276 decimal)",
+    "draw": "addr = (state >> 32) mod 2^31, then masked to a 64-byte boundary",
+    "why_not_stdlib": "std::rand and unseeded/version-dependent engines are not guaranteed to produce the same bit stream across platforms or standard-library versions; this LCG's three constants and 64-bit wraparound are the entire specification, so its output is reproducible anywhere that re-implements this file."
+  },
+  "transaction_count": 8000,
+  "history_window_ns": 2600.0,
+  "observed_windows": 102,
+  "observed_headline_metrics": {
+    "sim_time_ns": 262948,
+    "avg_dram_bandwidth_gbps": 1.94715,
+    "avg_latency_ns": 262.84,
+    "bandwidth_utilization_pct": 7.60607,
+    "page_hit_rate_pct": 0.0,
+    "row_conflict_rate_pct": 99.8,
+    "row_empty_rate_pct": 0.2,
+    "bankgroup_reuse_rate_pct": 25.7625
+  },
+  "sanity_checks": [
+    "hits+conflicts+empties = 0+99.8+0.2 = 100.0 -- OK",
+    "row_empty_rate_pct (0.2%) is close to 16/8000 = 0.2% -- exactly matches 'one empty per bank on first touch', confirming addresses really do spread across all 16 banks as intended",
+    "page_hit_rate_pct == 0% is the expected worst case for i.i.d. uniform addressing -- OK",
+    "bankgroup_reuse_rate_pct (25.8%) is close to the 1-in-4 chance of two independent uniform draws landing in the same bankgroup, unlike seq_read's structurally-forced ~100% -- consistent with genuinely random addressing rather than a mapping artifact"
+  ]
+}
