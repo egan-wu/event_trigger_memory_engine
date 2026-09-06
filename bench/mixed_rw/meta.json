@@ -1,0 +1,32 @@
+{
+  "name": "mixed_rw",
+  "purpose": "Read/write turnaround and write-recovery paths, on an otherwise page-hit-friendly stream.",
+  "description": [
+    "8000 transactions on one core: strictly alternating AR (id 0) / AW (id 1), 64 bytes each, sequential addresses (addr_i = base + i*64, same run of addresses for both types -- i.e. reads and writes share the same rows/banks as they walk forward together).",
+    "Same row/bankgroup/bank cadence as seq_read (32 accesses per row, bankgroup effectively fixed), so any bandwidth difference from seq_read isolates the cost of alternating direction and of write-recovery (tWR) vs read-recovery (tRTP), not a difference in row-buffer behavior.",
+    "Tried first: routing reads and writes to two independent id-streams in DIFFERENT banks (bit 29 offset), specifically to separate rd_wr_turnaround/wr_rd_turnaround from same-bank tRTP/tWR recovery. It made no observable difference -- turnaround_overhead_pct was 0% either way. Reason (see command_queue.cpp): every column command on this channel already pays tCCD_L (5.0 ns = 16 cycles, since bankgroup barely rotates) or, on the same bank, the tWR/tRTP recovery gate (up to 48 cycles) before the NEXT command on that resource is allowed -- both of which already exceed rd_wr_turnaround/wr_rd_turnaround (2.5 ns = 8 cycles each) in this timing config, so the turnaround check's own 'if (with_turn > earliest)' guard never fires. Kept the simpler single-stream layout since the alternative added complexity for an identical result.",
+    "This 0% turnaround_overhead_pct is expected and explained, not a bug in the workload -- see bench/README.md's known-wrong-behavior list and prediction table for what should change here once the tRTP/tWR over-gate is fixed (this workload's mix of read and write recovery on a hit streak is exactly what that bug affects)."
+  ],
+  "generator": "bench/generate_workloads.py:gen_mixed_rw",
+  "deterministic": true,
+  "rng": "none -- strict alternation, no randomness",
+  "transaction_count": 8000,
+  "history_window_ns": 1000.0,
+  "observed_windows": 100,
+  "observed_headline_metrics": {
+    "sim_time_ns": 99756.6,
+    "avg_dram_bandwidth_gbps": 5.13249,
+    "avg_latency_ns": 199.346,
+    "bandwidth_utilization_pct": 20.0488,
+    "page_hit_rate_pct": 96.875,
+    "row_conflict_rate_pct": 3.1125,
+    "row_empty_rate_pct": 0.0125,
+    "turnaround_overhead_pct": 0.0,
+    "bankgroup_reuse_rate_pct": 99.9875
+  },
+  "sanity_checks": [
+    "hits+conflicts+empties = 96.875+3.1125+0.0125 = 100.0 -- OK",
+    "hit/conflict/empty rates identical to seq_read, as designed (same address cadence) -- OK",
+    "avg_dram_bandwidth_gbps (5.13) is meaningfully LOWER than seq_read's (7.63) despite the identical row-buffer statistics -- the entire delta is the extra tWR (15.0 ns) recovery on every write versus tRTP (7.5 ns) on every read, i.e. exactly the write-recovery path this workload exists to isolate"
+  ]
+}

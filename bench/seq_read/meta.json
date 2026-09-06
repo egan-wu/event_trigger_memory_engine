@@ -1,0 +1,29 @@
+{
+  "name": "seq_read",
+  "purpose": "Page-hit upper bound for a single stream, and a stress test for bank-group ordering.",
+  "description": [
+    "8000 AR (read) transactions on one core, one AXI id (0), 64 bytes each, strictly sequential addresses starting at 0x10000000 (addr_i = base + i*64).",
+    "With this config's address mapping (row bits [11:26], bankgroup bits [27:28], bank bits [29:30]), a sequential stream stays in the same row for 2048/64 = 32 accesses before a row conflict, and only rotates bankgroup once every 2^16 rows -- i.e. essentially never over 8000 transactions. So this workload should show a high page-hit rate (row reuse works) but ALSO a near-100% bankgroup_reuse_rate_pct (every column command pays tCCD_L, not tCCD_S), because bankgroup is not the fastest-changing field in this mapping. That combination -- high hit rate, capped bandwidth -- is the point: it isolates the bank-group-ordering pathology described in README.md 'Bank-group ordering' from row-buffer behavior, which alone would predict much higher bandwidth than actually comes out."
+  ],
+  "generator": "bench/generate_workloads.py:gen_seq_read",
+  "deterministic": true,
+  "rng": "none -- pure arithmetic sequence, no randomness",
+  "transaction_count": 8000,
+  "history_window_ns": 700.0,
+  "observed_windows": 96,
+  "observed_headline_metrics": {
+    "sim_time_ns": 67088.1,
+    "avg_dram_bandwidth_gbps": 7.63175,
+    "avg_latency_ns": 67.0619,
+    "bandwidth_utilization_pct": 29.8115,
+    "page_hit_rate_pct": 96.875,
+    "row_conflict_rate_pct": 3.1125,
+    "row_empty_rate_pct": 0.0125,
+    "bankgroup_reuse_rate_pct": 99.9875
+  },
+  "sanity_checks": [
+    "hits+conflicts+empties = 96.875+3.1125+0.0125 = 100.0 -- OK",
+    "bandwidth_utilization_pct (29.8%) well under 100% -- OK",
+    "sequential workload shows LOW row-conflict rate (3.1%, from the expected 1-in-32 row rollover) -- OK, matches the address-mapping arithmetic above"
+  ]
+}

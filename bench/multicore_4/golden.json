@@ -1,0 +1,23 @@
+{
+  "total_txns": 8000,
+  "total_bytes": 512000,
+  "total_dram_bytes": 512000,
+  "total_cycles": 156728,
+  "sim_time_ns": 48977.5,
+  "avg_bandwidth_gbps": 10.4538,
+  "avg_dram_bandwidth_gbps": 10.4538,
+  "peak_bandwidth_gbps": 25.6,
+  "bandwidth_utilization_pct": 40.8351,
+  "burst_efficiency_pct": 100,
+  "avg_latency_ns": 195.388,
+  "page_hit_rate_pct": 96.85,
+  "row_conflict_rate_pct": 3.1,
+  "row_empty_rate_pct": 0.05,
+  "refresh_overhead_pct": 4.15944,
+  "turnaround_overhead_pct": 0,
+  "bankgroup_reuse_rate_pct": 99.9875,
+  "windowed.window_count": 98,
+  "windowed.avg_bandwidth_gbps_mean": 10.449,
+  "windowed.avg_bandwidth_gbps_min": 3.072,
+  "windowed.avg_bandwidth_gbps_max": 15.232
+}
