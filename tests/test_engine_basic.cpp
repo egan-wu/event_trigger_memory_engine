@@ -22,6 +22,12 @@ DdrcConfig make_test_config() {
     cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1;
     cfg.tFAW = 4; cfg.tWTR_S = 1; cfg.tWTR_L = 1; cfg.tRTP = 1; cfg.tWR = 1;
     cfg.tREFI = 100000; cfg.tRFC = 50; // refresh effectively never fires in these short tests
+    // CAS latency is deliberately zeroed: these tests hand-compute exact
+    // cycle counts to pin down row-status transitions, barrier ordering and
+    // window bucketing -- mechanisms tCL/tCWL only shift by a constant.
+    // Nonzero CAS is covered directly in test_command_queue.cpp, and
+    // end-to-end in cas_latency_is_visible_in_transaction_latency below.
+    cfg.tCL = 0; cfg.tCWL = 0;
     cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
     cfg.command_queue_depth = 8;
     cfg.max_outstanding_per_id = 4;
@@ -360,4 +366,39 @@ DDRTEST(windowed_history_reveals_channel_imbalance_invisible_in_aggregate) {
     bool channel1_idle = (w.dram_bytes_per_channel.size() < 2) || (w.dram_bytes_per_channel[1] == 0);
     DDR_CHECK(channel1_idle);
     DDR_CHECK_EQ(w.dram_bytes_per_channel[0], w.dram_bytes); // channel 0 alone accounts for the whole aggregate
+}
+
+// Guards the end-to-end CAS path. Every other test in this file zeroes
+// tCL/tCWL so its hand-computed cycle counts stay readable, which would
+// otherwise leave the engine-level plumbing of CAS latency -- from
+// ChannelScheduler through TxnResult::complete_cycle into latency_ns --
+// with no coverage at all. Rather than assert an absolute number, this runs
+// the same single transaction twice and pins the *difference* to tCL
+// exactly: that isolates CAS from every other constraint without having to
+// re-derive them, and fails loudly if CAS ever stops reaching latency_ns.
+DDRTEST(cas_latency_is_visible_in_transaction_latency) {
+    auto run_one = [](double tCL) {
+        DdrcConfig cfg = make_test_config(); // 1 ns/cycle, tRCD = 5
+        cfg.tCL = tCL;
+        Engine engine(cfg);
+        engine.push_txn(make_read(0x000)); // fresh bank -> Empty
+        engine.run();
+        return engine.results()[0];
+    };
+
+    // act=0, col_start = 0 + tRCD(5) = 5, transfer = 64B / 8B = 8 cycles.
+    const TxnResult no_cas = run_one(0.0);
+    DDR_CHECK_EQ(no_cas.complete_cycle, 13ull); // 5 + 0 + 8
+
+    // Same command, CAS latency 10 ns: data starts 10 cycles after the
+    // column command instead of immediately.
+    const TxnResult with_cas = run_one(10.0);
+    DDR_CHECK_EQ(with_cas.complete_cycle, 23ull); // 5 + 10 + 8
+    DDR_CHECK_EQ(with_cas.complete_cycle - no_cas.complete_cycle, 10ull);
+
+    // latency_ns must carry the same delta -- a regression that dropped CAS
+    // only in the reported latency (not the cycle count) would slip past the
+    // checks above.
+    DDR_CHECK(with_cas.latency_ns - no_cas.latency_ns > 9.999);
+    DDR_CHECK(with_cas.latency_ns - no_cas.latency_ns < 10.001);
 }

@@ -33,6 +33,11 @@ DdrcConfig two_channel_config() {
     cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1;
     cfg.tFAW = 4; cfg.tWTR_S = 1; cfg.tWTR_L = 1; cfg.tRTP = 1; cfg.tWR = 1;
     cfg.tREFI = 100000; cfg.tRFC = 50;
+    // CAS latency is deliberately zeroed: these tests hand-compute exact
+    // cycle counts to pin down row-status transitions, barrier ordering and
+    // window bucketing -- mechanisms tCL/tCWL only shift by a constant.
+    // Nonzero CAS is covered directly in test_command_queue.cpp,.
+    cfg.tCL = 0; cfg.tCWL = 0;
     cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
     cfg.command_queue_depth = 8;
     cfg.max_outstanding_per_id = 4;
@@ -115,6 +120,11 @@ DDRTEST(multicore_multichannel_randomized_stress_holds_invariants) {
     cfg.tCCD_S = 2; cfg.tCCD_L = 3; cfg.tRRD_S = 2; cfg.tRRD_L = 4;
     cfg.tFAW = 12; cfg.tWTR_S = 1; cfg.tWTR_L = 2; cfg.tRTP = 1; cfg.tWR = 2;
     cfg.tREFI = 500; cfg.tRFC = 20; // short enough that refresh actually fires
+    // CAS latency is deliberately zeroed: these tests hand-compute exact
+    // cycle counts to pin down row-status transitions, barrier ordering and
+    // window bucketing -- mechanisms tCL/tCWL only shift by a constant.
+    // Nonzero CAS is covered directly in test_command_queue.cpp,.
+    cfg.tCL = 0; cfg.tCWL = 0;
     cfg.rd_wr_turnaround = 2; cfg.wr_rd_turnaround = 3;
     cfg.command_queue_depth = 16;
     cfg.max_outstanding_per_id = 4;

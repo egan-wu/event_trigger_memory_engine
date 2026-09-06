@@ -128,7 +128,8 @@ See `examples/ddrc_config.example.json` for a full example. Sections:
   versus JEDEC's "greater of N cycles or X ns" rule.
 - **`ddrc_resources`**: `command_queue_depth` (per channel, bounds
   backpressure), `max_outstanding_per_id` (see above), `scheduling_policy`
-  (currently informational — the engine always uses one FR-FCFS-lite policy).
+  (only `"fr_fcfs"` is accepted — the engine has exactly one arbiter, and
+  config validation rejects any other value rather than silently ignoring it).
 - **`reporting`**: `history_window_ns` — bucket size for the windowed
   bandwidth/byte-access history (0/omitted disables it). See "Windowed
   history" below.

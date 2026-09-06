@@ -231,6 +231,8 @@ void DdrcConfig::validate() const {
     check_nonneg(tRP, "tRP");
     check_nonneg(tRAS, "tRAS");
     check_nonneg(tRC, "tRC");
+    check_nonneg(tCL, "tCL");
+    check_nonneg(tCWL, "tCWL");
     check_nonneg(tCCD_S, "tCCD_S");
     check_nonneg(tCCD_L, "tCCD_L");
     check_nonneg(tRRD_S, "tRRD_S");
