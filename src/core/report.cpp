@@ -42,6 +42,8 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     summary.set("refresh_overhead_pct", s.refresh_overhead_pct);
     summary.set("turnaround_overhead_pct", s.turnaround_overhead_pct);
     summary.set("bankgroup_reuse_rate_pct", s.bankgroup_reuse_rate_pct);
+    summary.set("mapped_address_bits", static_cast<int64_t>(s.mapped_address_bits));
+    summary.set("high_address_regions", static_cast<int64_t>(s.high_address_regions));
 
     json::Value txns = json::Value::make_array();
     for (const auto& r : engine.results()) {
@@ -137,6 +139,8 @@ std::string format_summary_text(const Engine& engine) {
     os << "Refresh overhead:        " << s.refresh_overhead_pct << " %\n";
     os << "R/W turnaround overhead: " << s.turnaround_overhead_pct << " %\n";
     os << "Bank-group reuse rate:   " << s.bankgroup_reuse_rate_pct << " % (tCCD_L instead of tCCD_S)\n";
+    os << "Address map decodes:     bits [0, " << s.mapped_address_bits << ")  -- "
+       << s.high_address_regions << " distinct region(s) above that\n";
     return os.str();
 }
 

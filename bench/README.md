@@ -23,6 +23,7 @@ about what "golden" does and does not mean here.
 | `multicore_4/` | 4 cores x 2000 sequential streams, each its own bank | cross-stream command-queue/channel-arbitration contention |
 | `strided/` | single core, 6000 reads strided by exactly one row's span | pathological address-mapping case: guaranteed conflict, single bank, zero parallelism |
 | `bursty/` | single core, 40 barrier-separated bursts of 150 reads each | windowed-history time-axis correctness (dense vs. idle windows) |
+| `llama_decode_4c/` | 4 cores x 16 layers, each core streaming its quarter of a contiguous 1MB layer as 4KB reads, barrier per layer | multi-core weight streaming: inter-core row thrashing, and the row-op-overlap limitation below |
 
 Each directory contains:
 - `config.json` -- DDRC config (topology/mapping/timing identical across all
@@ -164,33 +165,33 @@ reason to force the golden to match anyway.
 
 ## Known-wrong behavior in the current goldens
 
-**The goldens committed right now capture known-incorrect timing-model
-behavior on purpose.** This harness's job is to make *change* visible and
-attributable, not to certify these numbers as physically correct DDR
-behavior. Specifically, as of this snapshot:
+**The goldens capture what this codebase currently computes, including
+behavior known to be wrong.** This harness's job is to make *change* visible
+and attributable, not to certify the numbers as physically correct DDR
+behavior. As of this snapshot:
 
-1. **Missing CAS latency.** `command_queue.cpp`'s dispatch path computes
-   `complete = col_start + transfer_cycles` with no added CAS latency (tCL)
-   between issuing a column command and data actually being ready. Real DRAM
-   adds a fixed pipeline delay here; this model currently adds none.
-2. **Missing tWTR.** There is no write-to-read turnaround timing anywhere in
-   `command_queue.cpp` (`tWTR_S`/`tWTR_L` are parsed from config but never
-   referenced) -- a read immediately following a write pays no extra delay
-   at all, when real DRAM requires one.
-3. **tRTP/tWR over-gate same-bank column commands, including hits.** The
-   same-bank recovery gate (`bank.bank_ready_cycle`, set to
-   `col_start + tRTP-or-tWR` after every column command) is checked before
-   *any* subsequent command to that bank -- including a same-row hit, which
-   in real DRAM only needs `tCCD` spacing, not a full read/write-recovery
-   wait. Only a *conflict* (a precharge) should actually need tRTP/tWR.
-4. **Refresh doesn't close rows.** `apply_refresh_if_due()` blocks time for
-   `tRFC` but never touches `bank.row_open`/`bank.open_row` -- a bank can
-   still register a page hit against a row that a refresh, in reality, would
-   have forced closed.
+1. **Row operations can't overlap other banks' data transfers.** On a row
+   miss, `drain_one()` starts the PRE/ACT sequence no earlier than
+   `earliest` -- which already includes the data-bus floor and the tCCD
+   floor -- so every conflict exposes the full `tRP + tRCD` (every empty,
+   `tRCD`) as dead time on the data bus. A real controller issues PRE/ACT to
+   one bank on the command bus while other banks' data is still streaming.
+   Measured on the full-scale Llama trace: 22.5% of the data bus's time is
+   this exposed conflict latency; an idealized overlap takes the same
+   traffic from 70% to 93% utilization. Every workload with row misses is
+   pessimistic until this is fixed -- `llama_decode_4c` (~50% conflicts)
+   most of all, `seq_read`/`multicore_4` least.
+2. **FR-FCFS degenerates to FCFS under saturation.** `kStarvationLimit`
+   (16) is below `command_queue_depth` (32), so once the queue is full every
+   pending command exceeds the limit and the starvation override picks the
+   oldest one on essentially every decision.
 
-Do not read these goldens as "this is what a DDR controller does" -- read
-them as "this is what this codebase currently computes," which is exactly
-what a regression check needs and nothing more.
+Fixed since the first snapshot (each is now covered by a hand-computed test
+in `tests/test_command_queue.cpp`): missing CAS latency (tCL/tCWL), missing
+tWTR, tRTP/tWR wrongly gating same-row column commands, and refresh not
+closing open rows. The prediction table below was written for those four
+fixes and is kept as a record; see the note under it for how the actual
+results compared.
 
 ## Prediction table
 
@@ -241,3 +242,17 @@ different bottleneck resource for the other). If either one instead matches
 `seq_read`'s magnitude exactly, that's worth understanding rather than
 shrugging off -- it would mean the hedge was wrong, which is itself useful
 information about how these fixes actually interact.
+
+### How the predictions actually came out
+
+Measured when the four fixes landed (bandwidth / latency, old golden → new):
+
+| case | bandwidth | latency | vs. prediction |
+|---|---|---|---|
+| `seq_read` | 7.63 → 10.33 GB/s (**+35%**) | 67.1 → 49.5 ns (**−26%**) | bandwidth right; **latency wrong** — the queueing time Fix 1 removed outweighed the CAS latency Fix 2 added. Service-time reasoning alone can't predict end-to-end latency in a queued system. |
+| `rand_read` | +2.9% | −2.8% | right (flat) |
+| `mixed_rw` | 5.13 → 4.02 GB/s (**−22%**) | +28% | **wrong direction** — tWTR outweighed Fix 1's gain. `turnaround_overhead_pct` went 0 → 3.9%: the old tWR over-gate had been masking bus turnaround entirely. |
+| `multicore_4` | −1% | ~flat | hedge was right, but it didn't even go up: with four banks feeding the channel, other banks fill the gap Fix 1 removed, so the over-gate was never binding here. |
+| `strided`, `bursty` | flat | flat | right |
+
+All workloads gained `row_empty_rate_pct` and lost `row_conflict_rate_pct` — Fix 4's signature (refresh now closes rows, so the next access re-opens instead of conflicting).

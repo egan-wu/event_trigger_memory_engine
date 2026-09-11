@@ -56,6 +56,14 @@ typedef struct {
     double row_empty_rate_pct;
     double refresh_overhead_pct;
     double turnaround_overhead_pct;
+    double bankgroup_reuse_rate_pct; /* % of column commands that paid tCCD_L (same bank group as the previous one) */
+    /* Input-integrity check: the address map decodes only address bits
+     * [0, mapped_address_bits); high_address_regions counts distinct values
+     * of the ignored bits above that. 1 is normal (a constant DRAM base
+     * offset drops out); >1 means separate regions of the trace alias onto
+     * the same banks/rows/columns and page-hit rate is overstated. */
+    int32_t mapped_address_bits;
+    uint64_t high_address_regions;
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the

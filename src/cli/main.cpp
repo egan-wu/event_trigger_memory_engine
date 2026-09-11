@@ -82,6 +82,18 @@ int main(int argc, char** argv) {
 
         std::cout << "\n" << ddrtiming::format_summary_text(engine);
 
+        // Not a performance verdict -- an input-integrity problem: the
+        // numbers above describe a different workload than the trace meant.
+        const ddrtiming::SummaryStats& s = engine.summary();
+        if (s.high_address_regions > 1) {
+            std::cerr << "\nwarning: transactions span " << s.high_address_regions
+                      << " distinct address regions above bit " << (s.mapped_address_bits - 1)
+                      << ", the highest bit the address map decodes. Those regions alias onto the same "
+                         "banks/rows/columns (the modeled DRAM covers 2^" << s.mapped_address_bits
+                      << " bytes), so they share open rows and page-hit rate is overstated. Place the "
+                         "trace's buffers inside the modeled capacity, or widen the row mapping.\n";
+        }
+
         if (!out_path.empty()) {
             ddrtiming::write_report_json(engine, out_path);
             std::cout << "\nJSON report written to " << out_path << "\n";

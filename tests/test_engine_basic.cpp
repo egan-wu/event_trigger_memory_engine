@@ -402,3 +402,33 @@ DDRTEST(cas_latency_is_visible_in_transaction_latency) {
     DDR_CHECK(with_cas.latency_ns - no_cas.latency_ns > 9.999);
     DDR_CHECK(with_cas.latency_ns - no_cas.latency_ns < 10.001);
 }
+
+// make_test_config() maps row to bits [11, 31), so the map decodes bits
+// [0, 31) and anything at bit 31 or above is ignored by the decoder. Two
+// cases must be told apart: a whole trace sitting above a constant DRAM
+// base offset (harmless -- the offset just drops out, one region) versus
+// buffers placed further apart than the modeled capacity (they collapse
+// onto the same banks/rows and silently share open rows, >1 region).
+DDRTEST(high_address_regions_flags_aliasing_but_not_a_base_offset) {
+    {
+        Engine engine(make_test_config());
+        engine.push_txn(make_read(0x80000000ull)); // bit 31 set: a typical DRAM base
+        engine.push_txn(make_read(0x80000040ull));
+        engine.push_txn(make_read(0x80000800ull));
+        engine.run();
+        DDR_CHECK_EQ(engine.summary().mapped_address_bits, 31);
+        DDR_CHECK_EQ(engine.summary().high_address_regions, 1ull);
+    }
+    {
+        // Same low address in four "per-core" buffers 4GB apart -- exactly
+        // the synthetic llama trace's original layout. All four decode to
+        // one bank/row/column.
+        Engine engine(make_test_config());
+        for (uint64_t core = 0; core < 4; ++core) engine.push_txn(make_read(core << 32));
+        engine.run();
+        DDR_CHECK_EQ(engine.summary().high_address_regions, 4ull);
+        // ...and the consequence the check exists to expose: after the
+        // first access opens the row, the other three are page hits.
+        DDR_CHECK_EQ(engine.summary().page_hit_rate_pct > 74.9, true);
+    }
+}

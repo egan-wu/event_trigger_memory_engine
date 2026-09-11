@@ -131,6 +131,9 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     out->row_empty_rate_pct = s.row_empty_rate_pct;
     out->refresh_overhead_pct = s.refresh_overhead_pct;
     out->turnaround_overhead_pct = s.turnaround_overhead_pct;
+    out->bankgroup_reuse_rate_pct = s.bankgroup_reuse_rate_pct;
+    out->mapped_address_bits = s.mapped_address_bits;
+    out->high_address_regions = s.high_address_regions;
     return 0;
 }
 
@@ -253,4 +256,4 @@ const char* ddrt_last_error(ddrt_engine_t* engine) {
     return engine->last_error.c_str();
 }
 
-const char* ddrt_version(void) { return "0.1.0"; }
+const char* ddrt_version(void) { return "0.2.0"; }

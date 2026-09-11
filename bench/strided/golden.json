@@ -16,6 +16,8 @@
   "refresh_overhead_pct": 4.25339,
   "turnaround_overhead_pct": 0,
   "bankgroup_reuse_rate_pct": 99.9833,
+  "mapped_address_bits": 31,
+  "high_address_regions": 1,
   "windowed.window_count": 99,
   "windowed.avg_bandwidth_gbps_mean": 1.33751,
   "windowed.avg_bandwidth_gbps_min": 1.10345,

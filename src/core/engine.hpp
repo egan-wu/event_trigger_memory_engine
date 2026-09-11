@@ -39,6 +39,20 @@ struct SummaryStats {
     // fastest-changing position will show this near 100%; see README
     // "Bank-group ordering".
     double bankgroup_reuse_rate_pct = 0.0;
+    // Input-integrity check, not a performance metric. The address map only
+    // decodes the low mapped_address_bits bits of an address (see
+    // AddressDecoder::mapped_address_bits); everything above is silently
+    // ignored. high_address_regions counts the distinct values of those
+    // ignored high bits across every pushed transaction (saturating at
+    // kMaxTrackedHighRegions). 1 is normal -- a trace that lives entirely
+    // above some DRAM base offset (e.g. 0x8000_0000) is fine, the offset
+    // just drops out. >1 means distinct regions of the trace are being
+    // folded onto the SAME banks/rows/columns: e.g. per-core buffers placed
+    // further apart than the configured DRAM capacity, which then share open
+    // rows and report an unrealistically high page-hit rate. 0 when nothing
+    // has been pushed or nothing is mapped.
+    int mapped_address_bits = 0;
+    uint64_t high_address_regions = 0;
 };
 
 // One fixed-size bucket of simulated time (history_window_ns in the config),
@@ -234,6 +248,12 @@ private:
     std::map<int, uint64_t> core_port_free_cycle_;
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>> heap_;
     uint64_t max_out_ = 1;
+
+    // See SummaryStats::high_address_regions.
+    static constexpr size_t kMaxTrackedHighRegions = 1024;
+    int mapped_address_bits_ = 0;
+    std::set<uint64_t> high_address_regions_;
+    void note_high_address_region(uint64_t addr);
 
     void enqueue_if_ready(int core_id, int segment_idx, uint32_t axi_id);
     void compute_summary();

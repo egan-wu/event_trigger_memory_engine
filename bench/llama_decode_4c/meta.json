@@ -1,0 +1,20 @@
+{
+  "name": "llama_decode_4c",
+  "purpose": "The multi-core weight-streaming workload the project's scheduler/address-map investigations were run on, laid out realistically: 4 DMA cores splitting each layer of one model's weights.",
+  "description": [
+    "4 cores (core0.csv..core3.csv), 16 layers. Layer L's weights are one contiguous 1MB block at L*1MB; core c streams bytes [c*256KB, (c+1)*256KB) of it as 64 AXI reads of 4KB (size 64B x 64 beats, AXI id 1), then a BARRIER (its layer-L loads must land before its layer L+1 starts).",
+    "Scaled-down (16MB) version of the 1GB synthetic Llama-decode trace. That trace placed each core's buffer 4GB apart -- above bit 30, the highest bit this 2GB address map decodes -- so all four cores aliased onto the same banks/rows/columns and shared open rows: 70.4% utilization at 96.4% page-hit, describing a workload where four DMAs read the SAME weights. Here every address is inside the modeled capacity and high_address_regions must be 1.",
+    "Address map (from the bank-group-ordering fix): bankgroup [7:6] fastest-changing so consecutive 64B bursts pay tCCD_S not tCCD_L, then bank [9:8], channel [10], column [14:11], row [30:15]. A 4KB descriptor therefore sweeps all 32 banks twice (2 accesses per bank), and the next core's descriptor sweeps the same banks with a different row -- the inter-core row thrashing behind the ~50% conflict rate.",
+    "Known modeling limitation this case exposes (see bench/README.md): the scheduler starts every row miss's PRE/ACT only after the data bus is nearly free, instead of overlapping it with other banks' transfers as a real controller does, so each conflict exposes the full tRP+tRCD on the data bus. Expect this case to move sharply UP when that is fixed."
+  ],
+  "generator": "bench/generate_workloads.py:gen_llama_decode_4c",
+  "deterministic": true,
+  "rng": "none -- pure arithmetic sequence, no randomness",
+  "transaction_count": 4096,
+  "transaction_count_per_core": 1024,
+  "history_window_ns": 15000.0,
+  "sanity_checks": [
+    "high_address_regions == 1 -- the layout bug this case exists to have fixed",
+    "full-scale (1GB) run with the same layout gives the same utilization (14.4%) and hit/conflict (46.7% / 49.8%) -- the scale-down doesn't change the behavior"
+  ]
+}

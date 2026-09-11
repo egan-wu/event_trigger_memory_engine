@@ -123,6 +123,8 @@ Snapshot build_snapshot(const Engine& engine) {
     snap.add("refresh_overhead_pct", s.refresh_overhead_pct, false);
     snap.add("turnaround_overhead_pct", s.turnaround_overhead_pct, false);
     snap.add("bankgroup_reuse_rate_pct", s.bankgroup_reuse_rate_pct, false);
+    snap.add("mapped_address_bits", static_cast<double>(s.mapped_address_bits), true);
+    snap.add("high_address_regions", static_cast<double>(s.high_address_regions), true);
 
     const std::vector<WindowStats>& windows = engine.windows();
     double window_ns = engine.config().history_window_ns;

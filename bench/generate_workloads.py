@@ -195,6 +195,37 @@ def gen_bursty():
     return phases * per_phase, phases
 
 
+# ---------------------------------------------------------------------------
+# llama_decode_4c: 4 DMA cores streaming one model's weights, layer by layer.
+# A scaled-down (16MB) version of the synthetic Llama-decode trace that the
+# bank-group-ordering and row-op-overlap investigations were run on, with
+# the one layout bug of the original fixed: its per-core buffers sat 4GB
+# apart, above every bit the 2GB address map decodes, so all four cores
+# aliased onto the SAME banks/rows/columns and shared open rows (see
+# SummaryStats::high_address_regions). Here the weights are laid out the
+# way a single model's actually are: each layer is one contiguous block,
+# and core c streams the c-th quarter of it. Every address is inside the
+# modeled capacity, so high_address_regions must read 1.
+# ---------------------------------------------------------------------------
+def gen_llama_decode_4c():
+    cores, layers = 4, 16
+    slice_bytes = 256 * 1024          # one core's share of one layer
+    layer_bytes = cores * slice_bytes # one layer's weights, contiguous
+    txn_bytes, size = 4096, 64        # one AXI descriptor per 4KB, 64B beats
+    count = 0
+    for core in range(cores):
+        rows = []
+        for layer in range(layers):
+            addr = layer * layer_bytes + core * slice_bytes
+            for off in range(0, slice_bytes, txn_bytes):
+                rows.append(["AR", 1, hexaddr(addr + off), size, txn_bytes // size, ""])
+                count += 1
+            # this core's layer-N loads must land before its layer-N+1 starts
+            rows.append(["BARRIER"])
+        write_csv(os.path.join(SCRIPT_DIR, "llama_decode_4c", f"core{core}.csv"), rows)
+    return count
+
+
 if __name__ == "__main__":
     n_seq = gen_seq_read()
     n_rand, seed, span = gen_rand_read()
@@ -202,9 +233,11 @@ if __name__ == "__main__":
     n_multi = gen_multicore_4()
     n_strided = gen_strided()
     n_bursty, phases = gen_bursty()
+    n_llama = gen_llama_decode_4c()
     print(f"seq_read:     {n_seq} txns")
     print(f"rand_read:    {n_rand} txns (seed={hex(seed)}, span={span})")
     print(f"mixed_rw:     {n_mixed} txns")
     print(f"multicore_4:  {n_multi} txns (4 cores)")
     print(f"strided:      {n_strided} txns")
     print(f"bursty:       {n_bursty} txns ({phases} phases)")
+    print(f"llama_decode_4c: {n_llama} txns (4 cores x 16 layers, layer-contiguous)")

@@ -19,6 +19,7 @@ Engine::Engine(DdrcConfig cfg) : cfg_(std::move(cfg)) {
         channels_.push_back(std::make_unique<ChannelScheduler>(cfg_, c));
     }
     max_out_ = static_cast<uint64_t>(std::max(1, cfg_.max_outstanding_per_id));
+    mapped_address_bits_ = AddressDecoder(cfg_).mapped_address_bits();
 
     if (cfg_.history_window_ns > 0.0) {
         history_window_cycles_ = cfg_.ns_to_cycles(cfg_.history_window_ns);
@@ -41,7 +42,21 @@ void Engine::enqueue_if_ready(int core_id, int segment_idx, uint32_t axi_id) {
     idc.queued = true;
 }
 
+void Engine::note_high_address_region(uint64_t addr) {
+    // Nothing mapped (single-bank config) or every bit mapped: aliasing is
+    // either total-by-design or impossible, so there's nothing to report.
+    if (mapped_address_bits_ <= 0 || mapped_address_bits_ >= 64) return;
+    if (high_address_regions_.size() >= kMaxTrackedHighRegions) return;
+    high_address_regions_.insert(addr >> mapped_address_bits_);
+}
+
 uint64_t Engine::push_txn(const AxiTxn& txn) {
+    {
+        uint64_t bytes = static_cast<uint64_t>(txn.size_bytes) * txn.len_beats;
+        if (bytes == 0) bytes = txn.size_bytes;
+        note_high_address_region(txn.addr);
+        if (bytes > 0) note_high_address_region(txn.addr + bytes - 1);
+    }
     AxiTxn t = txn;
     t.txn_id = next_txn_id_++;
     int core_id = t.core_id;
@@ -417,6 +432,8 @@ void Engine::compute_summary() {
         s.turnaround_overhead_pct = static_cast<double>(total_turnaround_cycles) / channel_time_budget * 100.0;
     }
 
+    s.mapped_address_bits = mapped_address_bits_;
+    s.high_address_regions = high_address_regions_.size();
     summary_ = s;
 }
 

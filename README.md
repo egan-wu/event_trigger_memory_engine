@@ -174,6 +174,26 @@ currently retained in `results()` — see the pruning section below.
 | `bankgroup_reuse_rate_pct` | % of column commands that paid `tCCD_L` (same bank group as the immediately preceding command on that channel) instead of `tCCD_S` (different bank group) — see "Bank-group ordering" below |
 | `refresh_overhead_pct` | % of total channel-cycles (`channels × total_cycles`) spent blocked on refresh |
 | `turnaround_overhead_pct` | % of total channel-cycles spent on R↔W bus turnaround |
+| `mapped_address_bits` | how many low-order address bits the address map actually decodes (one past the highest bit any field reads). Bits at or above it are ignored — see "Address aliasing" below |
+| `high_address_regions` | input-integrity check: distinct values of the ignored high bits across every pushed transaction. `1` is normal; `>1` means separate parts of the trace alias onto the same DRAM locations. The CLI prints a warning when it is `>1` |
+
+#### Address aliasing
+
+The decoder only reads the bits the address map names; anything above the
+highest mapped bit is silently dropped, so the modeled DRAM covers
+`2^mapped_address_bits` bytes. That is harmless when the whole trace sits
+above one constant base (e.g. every address starts `0x8…` — the offset just
+drops out, one region). It is not harmless when a trace places buffers
+further apart than that capacity: they fold onto the **same**
+banks/rows/columns, share open rows, and the page-hit rate describes a
+workload that doesn't exist. The synthetic 4-core Llama-decode trace this
+project was tuned on had exactly this bug — per-core buffers 4 GB apart
+against a 2 GB map, all four cores reading the same physical locations —
+which reported 70% utilization at 96% page-hit; laid out inside the modeled
+capacity (`bench/llama_decode_4c`), the same traffic gives 14% at 47%.
+`high_address_regions > 1` is the signal to check the trace's base
+addresses against the configured capacity before trusting anything else in
+the report.
 
 Not currently broken out: no per-channel or per-bank split — everything above
 is summed across all channels/banks into one set of rates. No queue-occupancy

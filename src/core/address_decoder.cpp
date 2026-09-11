@@ -18,6 +18,15 @@ uint64_t AddressDecoder::extract(uint64_t addr, const AddressField& f) {
     return v;
 }
 
+int AddressDecoder::mapped_address_bits() const {
+    int highest = -1;
+    for (const AddressField* f : {&cfg_.map_channel, &cfg_.map_rank, &cfg_.map_bankgroup, &cfg_.map_bank, &cfg_.map_row}) {
+        for (int b : f->bits) highest = std::max(highest, b);
+        for (int b : f->hash_bits) highest = std::max(highest, b);
+    }
+    return highest + 1;
+}
+
 DecodedAddr AddressDecoder::decode(uint64_t addr) const {
     DecodedAddr d;
     d.channel = static_cast<uint32_t>(extract(addr, cfg_.map_channel));
