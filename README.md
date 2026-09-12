@@ -194,12 +194,39 @@ mid-stream barrier.
 
 ## 5. Output Spec
 
-Two equivalent forms, same fields either way: JSON (`ddrt_write_report_json`
-/ CLI `--out`, shape `{"summary": {...}, "transactions": [...], "windows": [...]}`,
-`"windows"` present only when windowing is enabled) or the C API's typed
-structs (`ddrt_get_summary` / `ddrt_get_result_at` / `ddrt_get_window_at`).
-`summary()` is always cumulative since the engine was created, regardless of
-what `prune_results_before()` has removed from `results()`.
+Three ways to read the same underlying fields: the CLI's plain-text summary
+(printed to stdout on every run — human-oriented, not meant to be parsed;
+see §5.0), JSON (`ddrt_write_report_json` / CLI `--out`, shape
+`{"summary": {...}, "transactions": [...], "core_burst_stats": [...], "windows": [...]}`,
+`"windows"` present only when windowing is enabled), or the C API's typed
+structs (`ddrt_get_summary` / `ddrt_get_result_at` / `ddrt_get_core_burst_stats_at`
+/ `ddrt_get_window_at`). `summary()` is always cumulative since the engine
+was created, regardless of what `prune_results_before()` has removed from
+`results()`.
+
+### 5.0 Plain-text CLI summary
+
+Printed unconditionally by `ddrtiming_cli` (no flag needed — `--out`/
+`--windowed-csv` are additional, not alternatives). Two blocks: system-wide
+metrics first, then one labeled sub-table per per-core stat category — AXI
+burst size (§5.5) is the first such sub-table, so a future per-core metric
+adds another sub-table here rather than a new top-level block.
+
+```
+==== System Summary ====
+Transactions:            4096
+...
+Address map decodes:     bits [0, 36)  -- 1 distinct region(s) above that
+
+==== Per-Core Summary ====
+AXI burst size (bytes):
+  core         n     mean      min      p25      p50      p75      max
+     0      1024     4096     4096     4096     4096     4096     4096
+     ...
+```
+
+The `Per-Core Summary` block is omitted entirely if nothing has been pushed
+yet (`ddrt_get_num_cores() == 0`).
 
 ### 5.1 Summary (`ddrt_summary_t`, JSON `"summary"`)
 
