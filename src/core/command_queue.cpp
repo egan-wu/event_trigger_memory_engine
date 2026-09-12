@@ -89,13 +89,68 @@ uint64_t ChannelScheduler::decision_cycle() const {
 // deliberately evaluated inside the eligible set too -- a not-yet-arrived
 // command still accumulates skips, and force-promoting one would drag the
 // whole channel forward to an arrival that hasn't happened.
-size_t ChannelScheduler::pick_best_index() const {
-    uint64_t now = decision_cycle();
-    auto eligible = [&](size_t i) { return pending_[i].ready_cycle <= now; };
+// [S] Decides whether this pick is restricted to reads or writes under
+// write_policy "batch", updating the channel's drain state as it goes.
+// Writes accumulate while reads are served; once they reach the high
+// watermark (or no read is available) the channel flips and drains them as a
+// batch, paying one turnaround and one tWTR for the whole run instead of one
+// per command. It flips back when the writes are down to the low watermark,
+// when none is left, or when a read is waiting and the batch has already
+// been long enough to be worth it.
+int ChannelScheduler::choose_direction_filter() {
+    if (cfg_.write_policy != "batch") return 0;
 
+    uint64_t now = decision_cycle();
+    int queued_writes = 0, ready_writes = 0, ready_reads = 0;
+    for (const auto& p : pending_) {
+        bool ready = p.ready_cycle <= now;
+        if (p.cmd.type == TxnType::Write) {
+            ++queued_writes;
+            if (ready) ++ready_writes;
+        } else if (ready) {
+            ++ready_reads;
+        }
+    }
+
+    int high = cfg_.write_drain_high > 0 ? cfg_.write_drain_high
+                                          : std::max(1, cfg_.command_queue_depth / 2);
+    int low = cfg_.write_drain_low;
+
+    if (!draining_writes_) {
+        if (ready_writes > 0 && (queued_writes >= high || ready_reads == 0)) {
+            draining_writes_ = true;
+            writes_in_batch_ = 0;
+        }
+    } else {
+        bool long_enough = writes_in_batch_ >= static_cast<uint32_t>(std::max(0, cfg_.write_batch_min));
+        if (ready_writes == 0 || queued_writes <= low || (long_enough && ready_reads > 0)) {
+            draining_writes_ = false;
+        }
+    }
+    return draining_writes_ ? 2 : 1;
+}
+
+size_t ChannelScheduler::pick_best_index(int dir_filter) const {
+    uint64_t now = decision_cycle();
+    auto arrived = [&](size_t i) { return pending_[i].ready_cycle <= now; };
+    auto matches_dir = [&](size_t i) {
+        if (dir_filter == 1) return pending_[i].cmd.type == TxnType::Read;
+        if (dir_filter == 2) return pending_[i].cmd.type == TxnType::Write;
+        return true;
+    };
+    // A direction filter that matches nothing is dropped rather than
+    // stalling the channel on its own policy.
+    bool dir_has_candidate = false;
+    for (size_t i = 0; i < pending_.size() && !dir_has_candidate; ++i) {
+        if (arrived(i) && matches_dir(i)) dir_has_candidate = true;
+    }
+    auto eligible = [&](size_t i) { return arrived(i) && (!dir_has_candidate || matches_dir(i)); };
+
+    // Starvation deliberately ignores the direction filter: a command held
+    // back long enough must go regardless of which way the bus is facing.
     long starved = -1;
     for (size_t i = 0; i < pending_.size(); ++i) {
-        if (!eligible(i)) continue;
+        if (!arrived(i)) continue;
         if (pending_[i].skip_count >= kStarvationLimit &&
             (starved < 0 || pending_[i].seq < pending_[static_cast<size_t>(starved)].seq)) {
             starved = static_cast<long>(i);
@@ -154,6 +209,10 @@ uint64_t ChannelScheduler::apply_refresh_if_due(uint32_t rank_idx, uint64_t earl
                 bank.row_open = false;
                 bank.col_ready_cycle = std::max(bank.col_ready_cycle, refresh_end);
                 bank.precharge_ready_cycle = std::max(bank.precharge_ready_cycle, refresh_end);
+                // [S] A refresh leaves every bank precharged, so the next
+                // ACT needs no tRP of its own -- it may go at the refresh's
+                // end.
+                bank.act_ready_cycle = std::max(bank.act_ready_cycle, refresh_end);
             }
         }
         rk.next_refresh_due_cycle += cyc(cfg_.tREFI);
@@ -251,7 +310,10 @@ uint64_t ChannelScheduler::place_activate(uint32_t rank_idx, uint32_t bankgroup,
 }
 
 DramCommand ChannelScheduler::drain_one() {
-    size_t best = pick_best_index();
+    int dir_filter = choose_direction_filter(); // [S] write_policy "batch"
+    size_t best = pick_best_index(dir_filter);
+    if (pending_[best].cmd.type == TxnType::Write && draining_writes_) ++writes_in_batch_;
+    if (bus_used_ && last_bus_type_ != pending_[best].cmd.type) stats_.direction_switches++;
 
     // Age bookkeeping (starvation): everyone not selected this round gets
     // one step older. Must happen before erasing `best` so indices still
@@ -375,6 +437,20 @@ DramCommand ChannelScheduler::drain_one() {
         earliest = after_refresh;
     }
 
+    // [S] page_policy "timer": an open row that has sat idle longer than the
+    // timer was auto-precharged at last_col_start + timer, so this access
+    // finds the bank closed (row-empty) rather than hitting or conflicting.
+    // The precharge itself happened back then, in the shadow of whatever the
+    // bus was doing, so only its tRP stands between that moment and the ACT.
+    if (bank.row_open && cfg_.page_policy == "timer") {
+        uint64_t close_at = bank.last_col_start_cycle + cyc(cfg_.page_close_timer_ns);
+        if (visible_cycle > close_at) {
+            bank.row_open = false;
+            bank.act_ready_cycle =
+                std::max(bank.act_ready_cycle, std::max(close_at, bank.precharge_ready_cycle) + cyc(cfg_.tRP));
+        }
+    }
+
     RowStatus status;
     uint64_t col_start;
     uint64_t pre_slot_col_start = 0; // [S] col_start before command-bus slot contention
@@ -392,7 +468,7 @@ DramCommand ChannelScheduler::drain_one() {
         // gating (monotone-ACT-order guarantee lives here -- see its own
         // comment), and a command-bus slot.
         uint64_t act_start = place_activate(rank_idx, cmd.addr.bankgroup,
-                                             std::max(visible_cycle, bank.precharge_ready_cycle));
+                                             std::max(visible_cycle, bank.act_ready_cycle));
         // The row is ready for its column command at act_start+tRCD, EXCEPT
         // a refresh that comes due in [act_start, act_start+tRCD) forces
         // every bank in the rank precharged again, so the row we just
@@ -535,6 +611,17 @@ DramCommand ChannelScheduler::drain_one() {
     // (FIX 1), never column-to-column spacing.
     uint64_t recovery_ns = (cmd.type == TxnType::Read) ? cfg_.tRTP : cfg_.tWR;
     bank.precharge_ready_cycle = std::max(col_start + cyc(recovery_ns), bank.row_opened_at_cycle + cyc(cfg_.tRAS));
+    bank.last_col_start_cycle = col_start; // [S] reference point for the "timer" page policy
+
+    // [S] page_policy "closed": this column command carried auto-precharge,
+    // so the row is already closing. The precharge waits only on the bank's
+    // own recovery (tRTP/tWR, tRAS) and then runs concurrently with whatever
+    // else is on the bus, which is the whole point -- the next access to
+    // this bank pays ACT + tRCD, never PRE + tRP + ACT + tRCD.
+    if (cfg_.page_policy == "closed") {
+        bank.row_open = false;
+        bank.act_ready_cycle = std::max(bank.act_ready_cycle, bank.precharge_ready_cycle + cyc(cfg_.tRP));
+    }
 
     bus_free_cycle_ = complete;
     last_bus_type_ = cmd.type;

@@ -56,6 +56,7 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     attr.set("frontend_idle_pct", s.attr_frontend_idle_pct);
     attr.set("other_pct", s.attr_other_pct);
     summary.set("bus_time_attribution", std::move(attr));
+    summary.set("rw_direction_switches", static_cast<int64_t>(s.rw_direction_switches));
 
     json::Value txns = json::Value::make_array();
     for (const auto& r : engine.results()) {
@@ -185,6 +186,7 @@ std::string format_summary_text(const Engine& engine) {
     os << "  tCCD_L excess:         " << s.attr_tccd_l_excess_pct << " %\n";
     os << "  front-end idle:        " << s.attr_frontend_idle_pct << " %\n";
     os << "  other:                 " << s.attr_other_pct << " %\n";
+    os << "R/W direction switches:  " << s.rw_direction_switches << "\n";
 
     // Second block: everything that's broken out per-core, each stat
     // category as its own labeled sub-table (one line per core) under this

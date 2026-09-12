@@ -143,6 +143,7 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     out->attr_tccd_l_excess_pct = s.attr_tccd_l_excess_pct;
     out->attr_frontend_idle_pct = s.attr_frontend_idle_pct;
     out->attr_other_pct = s.attr_other_pct;
+    out->rw_direction_switches = s.rw_direction_switches;
     return 0;
 }
 

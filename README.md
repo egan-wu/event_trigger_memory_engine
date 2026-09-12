@@ -136,6 +136,12 @@ only override what you need.
 | `ddrc_resources` | `command_queue_depth` | `32` | per-channel queue depth (backpressure bound) |
 | | `max_outstanding_per_id` | `16` | cap per `(core_id, axi_id)` stream, not per core |
 | | `scheduling_policy` | `"fr_fcfs"` | only accepted value |
+| | `page_policy` | `"open"` | `"open"` leaves a row open after its column command; `"closed"` issues every column command with auto-precharge, so the row's tRP runs in the shadow of other traffic and the next access to that bank pays ACT+tRCD instead of PRE+tRP+ACT+tRCD; `"timer"` leaves it open until `page_close_timer_ns` of bank idle have passed. Which one wins is entirely workload-dependent — `"closed"` roughly doubles `rand_read`'s bandwidth here and roughly quarters `llama_decode_4c`'s |
+| | `page_close_timer_ns` | `0` | idle time before an open row is auto-precharged; must be `> 0` for `page_policy: "timer"`, unused otherwise |
+| | `write_policy` | `"interleave"` | `"interleave"` schedules reads and writes from one FR-FCFS pool, so the bus can flip direction on any command; `"batch"` serves reads first and drains accumulated writes as a run, amortizing bus turnaround and tWTR the way a real write CAM does (`mixed_rw` here: 15.9% → 28.9% utilization, 7999 → 499 direction changes) |
+| | `write_drain_high` | `0` (= `command_queue_depth/2`) | queued writes that start a drain batch |
+| | `write_drain_low` | `0` | queued writes that end one |
+| | `write_batch_min` | `8` | writes to serve before a waiting read may interrupt a batch. Capped in practice by the scheduler's starvation limit (16 selections), which overrides direction so a read can never be held indefinitely — values above that have no additional effect |
 | `reporting` | `history_window_ns` | `0` (off) | window size for windowed history, §5.3 |
 
 `DdrcConfig::validate()` (run automatically on load, or standalone via
@@ -327,6 +333,7 @@ yet (`ddrt_get_num_cores() == 0`).
 | `mapped_address_bits` | how many low-order address bits the address map actually decodes |
 | `high_address_regions` | distinct values seen of the bits *above* `mapped_address_bits`. `1` is normal; `>1` means separate parts of the trace alias onto the same DRAM locations and every rate above is describing a workload that doesn't exist — fix the trace's base addresses or widen the mapping before trusting anything else here |
 | `bus_time_attribution` (JSON object; `attr_*_pct` in the C struct) | where the run's channel-time went — see below |
+| `rw_direction_switches` | times the data bus changed direction. Each costs a turnaround, and each write→read also a tWTR, so this is the count behind `turnaround_pct`/`twtr_pct` — and what `write_policy: "batch"` (§4.3) reduces |
 
 #### Bus-time attribution
 
@@ -520,7 +527,8 @@ can be read as a triage order rather than guessed at:
 | observation | look at next | indicates |
 |---|---|---|
 | `bus_time_attribution.tccd_l_excess_pct` large | `bankgroup_reuse_rate_pct` | the bank-group field is not the fastest-changing one in `address_mapping` (§4.3) |
-| `bus_time_attribution.twtr_pct` large | the workload's R/W interleave | reads and writes alternate too finely for the DRAM's write-to-read recovery |
+| `bus_time_attribution.twtr_pct` large | `rw_direction_switches` | reads and writes alternate too finely for the DRAM's write-to-read recovery — `write_policy: "batch"` (§4.3) is the direct lever |
+| `bus_time_attribution.row_miss_exposed_pct` large | `page_hit_rate_pct`, `bank_utilization_pct` | rows are being opened and closed faster than the traffic reuses them; `page_policy` (§4.3) and the address map are the levers, in that order for scattered traffic |
 | `bus_time_attribution.frontend_idle_pct` large | `outstanding_occupancy_pct` | the limit is upstream of DRAM (outstanding cap, barriers, or the workload itself) |
 | `outstanding_occupancy_pct` pinned near 100% | — | `max_outstanding_per_id` itself is the limiter, not DRAM |
 | `outstanding_occupancy_pct` low | `bank_utilization_pct` | rules out the outstanding cap |

@@ -18,6 +18,16 @@ struct BankState {
     // activate that opened the row -- both are genuine precharge-only
     // constraints, never column-to-column spacing.
     uint64_t precharge_ready_cycle = 0;
+    // [S] Earliest cycle an ACTIVATE may open a row in this bank while it is
+    // closed. For a bank that was never opened this is 0; a refresh leaves
+    // the rank precharged, so it becomes the refresh's end; an
+    // auto-precharge (page_policy "closed"/"timer") already paid its own
+    // tRP in the shadow of other traffic, so it becomes that precharge plus
+    // tRP. Only meaningful when row_open is false.
+    uint64_t act_ready_cycle = 0;
+    // [S] col_start of this bank's most recent column command -- the
+    // reference point for the "timer" page policy's idle countdown.
+    uint64_t last_col_start_cycle = 0;
 };
 
 struct RankState {

@@ -58,6 +58,11 @@ struct ChannelStats {
     uint64_t attr_other_cycles = 0;
     // End of this channel's last data burst, for the trailing-idle term.
     uint64_t last_data_end_cycle = 0;
+    // [S] Times the data bus changed direction (read<->write). Each one
+    // costs a turnaround and, going write->read, a tWTR; batching writes is
+    // how a real controller amortizes both. Counts the switch itself, not
+    // whether it happened to delay anything.
+    uint64_t direction_switches = 0;
 };
 
 // Per-channel DDRC scheduler: bounded command queue (backpressure), genuine
@@ -213,13 +218,27 @@ private:
     uint64_t last_hit_bank_key_ = ~0ull; // sentinel: no streak yet
     uint32_t consecutive_hit_count_ = 0;
 
+    // [S] write_policy "batch" state: whether this channel is currently
+    // draining its accumulated writes, and how many it has drained in the
+    // current batch (so a waiting read can interrupt once the batch has
+    // been long enough to be worth the turnaround).
+    bool draining_writes_ = false;
+    uint32_t writes_in_batch_ = 0;
+
     int peek_priority(const DramCommand& cmd) const; // 0=hit, 1=idle/never-opened bank, 2=conflict
     uint64_t bank_key_of(const DramCommand& cmd) const;
     // [S] Cycle at which the next selection is considered to happen; only
     // commands whose ready_cycle has passed it are candidates. See the
     // definition in command_queue.cpp.
     uint64_t decision_cycle() const;
-    size_t pick_best_index() const;
+    // [S] Which direction this pick is restricted to under write_policy
+    // "batch": 0 = either, 1 = reads only, 2 = writes only. Updates the
+    // channel's drain state, so it is called exactly once per drain_one().
+    int choose_direction_filter();
+    // dir_filter as above; a filter that matches nothing falls back to
+    // considering both directions, so the channel never stalls on its own
+    // policy.
+    size_t pick_best_index(int dir_filter) const;
     uint64_t apply_refresh_if_due(uint32_t rank_idx, uint64_t earliest_cycle);
     uint64_t apply_activate_gating(RankState& rk, uint32_t bankgroup, uint64_t cycle);
 

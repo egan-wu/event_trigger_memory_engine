@@ -111,6 +111,37 @@ struct DdrcConfig {
     int max_outstanding_per_id = 16;
     std::string scheduling_policy = "fr_fcfs"; // "fr_fcfs" | "in_order"
 
+    // [S] scheduler policy knobs. Defaults reproduce the behavior that
+    // predates them exactly, so turning neither on changes no number.
+    //
+    // page_policy: what happens to a row after its column command.
+    //   "open"   (default) leave it open and hope the next access to this
+    //            bank wants the same row -- best for streaming locality.
+    //   "closed" issue every column command with auto-precharge, so the
+    //            row closes immediately and its tRP runs in the shadow of
+    //            whatever else the bus is doing. Every access is then a
+    //            row-empty (ACT + tRCD) instead of sometimes a conflict
+    //            (PRE + tRP + ACT + tRCD) -- what a real controller is
+    //            configured to do for scattered traffic.
+    //   "timer"  leave it open, but treat it as auto-precharged once
+    //            page_close_timer_ns has passed since its last column
+    //            command (the idle-timer policy real controllers use to
+    //            get open-page locality without paying for stale rows).
+    std::string page_policy = "open";
+    double page_close_timer_ns = 0.0; // required > 0 for "timer"
+
+    // write_policy: how reads and writes share the channel.
+    //   "interleave" (default) one FR-FCFS pool, so the bus can flip
+    //                direction on any command.
+    //   "batch"      reads are served first and writes accumulate, draining
+    //                as a batch -- the write-CAM behavior of real DDRC IP,
+    //                which amortizes bus turnaround and tWTR over a run of
+    //                writes instead of paying them per command.
+    std::string write_policy = "interleave";
+    int write_drain_high = 0;  // start draining at this many queued writes; 0 = command_queue_depth/2
+    int write_drain_low = 0;   // stop draining at this many queued writes
+    int write_batch_min = 8;   // writes to serve before a waiting read may interrupt the batch
+
     // reporting: bucket dispatched transactions into fixed-size windows of
     // simulated time (by issue_cycle) for a bandwidth/byte-access history,
     // independent of when/how often the caller happens to call run() and

@@ -70,6 +70,11 @@ struct SummaryStats {
     double attr_tccd_l_excess_pct = 0.0;     // tCCD_L paid where tCCD_S would have done
     double attr_frontend_idle_pct = 0.0;     // bus waited for a command to arrive
     double attr_other_pct = 0.0;             // command-bus slots, same-bank column pipeline
+    // [S] Data-bus direction changes across all channels. Each costs a
+    // turnaround, and each write->read also a tWTR, so this is the count
+    // behind attr_turnaround_pct/attr_twtr_pct -- and what
+    // ddrc_resources.write_policy "batch" is meant to reduce.
+    uint64_t rw_direction_switches = 0;
 };
 
 // Distribution of AXI burst sizes (logical bytes requested per transaction,

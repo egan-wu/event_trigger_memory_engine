@@ -86,6 +86,13 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.command_queue_depth = static_cast<int>(r.get_int("command_queue_depth", cfg.command_queue_depth));
         cfg.max_outstanding_per_id = static_cast<int>(r.get_int("max_outstanding_per_id", cfg.max_outstanding_per_id));
         cfg.scheduling_policy = r.get_str("scheduling_policy", cfg.scheduling_policy);
+        // [S] scheduler policy knobs
+        cfg.page_policy = r.get_str("page_policy", cfg.page_policy);
+        cfg.page_close_timer_ns = r.get_num("page_close_timer_ns", cfg.page_close_timer_ns);
+        cfg.write_policy = r.get_str("write_policy", cfg.write_policy);
+        cfg.write_drain_high = static_cast<int>(r.get_int("write_drain_high", cfg.write_drain_high));
+        cfg.write_drain_low = static_cast<int>(r.get_int("write_drain_low", cfg.write_drain_low));
+        cfg.write_batch_min = static_cast<int>(r.get_int("write_batch_min", cfg.write_batch_min));
     }
 
     if (root.contains("reporting")) {
@@ -303,6 +310,35 @@ void DdrcConfig::validate() const {
             "ddrc_resources.scheduling_policy = \"" + scheduling_policy +
             "\" is not implemented; ChannelScheduler (src/core/command_queue.cpp) always runs a single "
             "FR-FCFS-style arbiter regardless of this setting, so the only supported value is \"fr_fcfs\"");
+    }
+
+    // [S] scheduler policy knobs
+    if (page_policy != "open" && page_policy != "closed" && page_policy != "timer") {
+        throw std::runtime_error("ddrc_resources.page_policy = \"" + page_policy +
+                                  "\" is not a valid page policy; expected \"open\", \"closed\" or \"timer\"");
+    }
+    if (page_policy == "timer" && !(page_close_timer_ns > 0.0)) {
+        throw std::runtime_error("ddrc_resources.page_close_timer_ns = " + to_string(page_close_timer_ns) +
+                                  " must be > 0 when page_policy is \"timer\" (it is the idle time after which "
+                                  "an open row is auto-precharged); a value of 0 would close every row "
+                                  "immediately, which is what page_policy \"closed\" already expresses");
+    }
+    if (page_close_timer_ns < 0.0) {
+        throw std::runtime_error("ddrc_resources.page_close_timer_ns = " + to_string(page_close_timer_ns) +
+                                  " must be >= 0");
+    }
+    if (write_policy != "interleave" && write_policy != "batch") {
+        throw std::runtime_error("ddrc_resources.write_policy = \"" + write_policy +
+                                  "\" is not a valid write policy; expected \"interleave\" or \"batch\"");
+    }
+    if (write_drain_high < 0 || write_drain_low < 0 || write_batch_min < 0) {
+        throw std::runtime_error("ddrc_resources.write_drain_high/write_drain_low/write_batch_min must be >= 0");
+    }
+    if (write_drain_high > 0 && write_drain_low >= write_drain_high) {
+        throw std::runtime_error("ddrc_resources.write_drain_low = " + to_string(write_drain_low) +
+                                  " must be < write_drain_high = " + to_string(write_drain_high) +
+                                  " (draining starts at the high mark and stops at the low one, so a low mark "
+                                  "at or above it would start and stop a batch in the same breath)");
     }
 
     // history_window_ns: 0 legitimately means "disabled" (see the field

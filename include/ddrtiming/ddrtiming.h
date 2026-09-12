@@ -78,6 +78,8 @@ typedef struct {
     double attr_tccd_l_excess_pct;
     double attr_frontend_idle_pct;
     double attr_other_pct;
+    /* [S] Data-bus direction changes; what write_policy "batch" reduces. */
+    uint64_t rw_direction_switches;
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the

@@ -14,6 +14,8 @@
 #include "core/config.hpp"
 #include "core/types.hpp"
 
+#include <string>
+
 using namespace ddrtiming;
 
 namespace {
@@ -400,6 +402,122 @@ DDRTEST(arbitration_ignores_a_command_that_has_not_arrived_yet) {
     DDR_CHECK_EQ(second.addr.row, 0u);
     DDR_CHECK(second.row_status == RowStatus::Conflict);
     DDR_CHECK(second.start_cycle >= 20ull); // could not possibly precede its own arrival
+}
+
+namespace {
+// Shared by the page-policy tests: 1 ns/cycle, every recovery constraint
+// zeroed except the row cycle itself, so an ACT's floor is visible in the
+// column command's cycle with no other term mixed in.
+DdrcConfig page_policy_config() {
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 0; cfg.tRC = 5;
+    cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 0;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    return cfg;
+}
+} // namespace
+
+DDRTEST(closed_page_policy_auto_precharges_so_a_repeat_row_is_an_empty) {
+    // Same two commands, same row, under both policies. Open page: the
+    // second is a hit, right behind tCCD. Closed page: the first command
+    // carried auto-precharge, so the second finds the bank closed and pays
+    // ACT + tRCD -- but the precharge's tRP already ran in the shadow of the
+    // first transfer, which is the trade the policy exists to make.
+    {
+        DdrcConfig cfg = page_policy_config(); // "open" by default
+        ChannelScheduler sched(cfg, 0);
+        auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+        DDR_CHECK_EQ(a.start_cycle, 5ull); // ACT at 0, column at tRCD
+        auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+        DDR_CHECK(b.row_status == RowStatus::Hit);
+        // tCCD floor is 5+1=6, but a's column slot holds [5,7), so 7.
+        DDR_CHECK_EQ(b.start_cycle, 7ull);
+    }
+    {
+        DdrcConfig cfg = page_policy_config();
+        cfg.page_policy = "closed";
+        ChannelScheduler sched(cfg, 0);
+        auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+        DDR_CHECK_EQ(a.start_cycle, 5ull);
+        // Auto-precharge: bank recovery is col_start(5) + tRTP(0) = 5, so
+        // the row is gone and the next ACT may go at 5 + tRP(5) = 10;
+        // column at 10 + tRCD(5) = 15.
+        auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+        DDR_CHECK(b.row_status == RowStatus::Empty);
+        DDR_CHECK_EQ(b.start_cycle, 15ull);
+    }
+}
+
+DDRTEST(timer_page_policy_closes_a_row_only_once_it_has_gone_idle) {
+    DdrcConfig cfg = page_policy_config();
+    cfg.page_policy = "timer";
+    cfg.page_close_timer_ns = 20.0;
+    ChannelScheduler sched(cfg, 0);
+
+    auto a = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+    DDR_CHECK_EQ(a.start_cycle, 5ull); // ACT 0, column 5
+
+    // Arrives at 10, within 5 + 20 = 25: the row is still open.
+    auto b = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 10);
+    DDR_CHECK(b.row_status == RowStatus::Hit);
+    DDR_CHECK_EQ(b.start_cycle, 10ull);
+
+    // Arrives at 100, long past 10 + 20 = 30: the row was auto-precharged
+    // back at 30, so the ACT's own floor is 30 + tRP(5) = 35 -- already in
+    // the past by the time this command arrives, so it activates at 100 and
+    // its column command follows at 100 + tRCD(5).
+    auto c = admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 100);
+    DDR_CHECK(c.row_status == RowStatus::Empty);
+    DDR_CHECK_EQ(c.start_cycle, 105ull);
+}
+
+DDRTEST(write_batching_groups_writes_instead_of_flipping_the_bus_every_command) {
+    // Eight commands alternating read/write, all to the same row, all
+    // available at once. Under "interleave" FR-FCFS serves them in arrival
+    // order, so the bus changes direction on every single command. Under
+    // "batch" the writes are grouped, and the whole point is that the
+    // direction changes far fewer times.
+    auto build = [](const std::string& policy) {
+        DdrcConfig cfg = page_policy_config();
+        cfg.write_policy = policy;
+        cfg.write_drain_high = 2;
+        cfg.write_drain_low = 0;
+        cfg.write_batch_min = 2;
+        return cfg;
+    };
+    auto drain_types = [](ChannelScheduler& sched) {
+        std::string seq;
+        for (int i = 0; i < 8; ++i) seq += (sched.drain_one().type == TxnType::Read) ? 'R' : 'W';
+        return seq;
+    };
+    auto admit_alternating = [](ChannelScheduler& sched) {
+        for (int i = 0; i < 8; ++i) {
+            sched.try_admit(make_cmd(i % 2 == 0 ? TxnType::Read : TxnType::Write, 0, 0, 0, 0), 0);
+        }
+    };
+
+    {
+        DdrcConfig cfg = build("interleave");
+        ChannelScheduler sched(cfg, 0);
+        admit_alternating(sched);
+        DDR_CHECK_EQ(drain_types(sched), std::string("RWRWRWRW"));
+        DDR_CHECK_EQ(sched.stats().direction_switches, 7ull);
+    }
+    {
+        // Hand-traced: 4 queued writes already meet write_drain_high(2), so
+        // the channel opens in write-drain and takes W,W; write_batch_min(2)
+        // is then satisfied and a read is waiting, so it flips to R; the
+        // remaining 2 writes again meet the high mark, giving W,W; then the
+        // writes run out and the last three reads follow.
+        DdrcConfig cfg = build("batch");
+        ChannelScheduler sched(cfg, 0);
+        admit_alternating(sched);
+        DDR_CHECK_EQ(drain_types(sched), std::string("WWRWWRRR"));
+        DDR_CHECK_EQ(sched.stats().direction_switches, 3ull);
+    }
 }
 
 DDRTEST(starvation_does_not_promote_a_command_that_has_not_arrived) {

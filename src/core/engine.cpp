@@ -479,6 +479,7 @@ void Engine::compute_summary() {
                                 ? cum_max_complete_cycle_ - cs.last_data_end_cycle
                                 : 0;
         attr_idle += cs.attr_frontend_idle_cycles + trailing;
+        s.rw_direction_switches += cs.direction_switches;
     }
 
     uint64_t total_cmds = total_hits + total_conflicts + total_empties;
