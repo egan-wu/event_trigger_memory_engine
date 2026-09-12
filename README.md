@@ -49,6 +49,7 @@ Produces (exact path depends on generator, e.g. `build/Release/` with MSVC):
 |---|---|
 | `libddrtiming` (static) | the engine, C ABI — link this into your own tool |
 | `ddrtiming_cli` | standalone CLI (§4.1) |
+| `ddrtiming_sweep` | standalone parameter-sweep tool: Cartesian-products config overrides against one workload, one summary-metrics row per point (§4.5) |
 | `windowed_history_analyze` | standalone stats exporter for windowed-history CSVs (§5.4) |
 | `daemon_demo` | reference implementation of the streaming push/run/prune usage pattern |
 | `golden_check` | regression harness used by `ctest` (see `bench/README.md`) |
@@ -191,6 +192,82 @@ wherever it needs to go, then `ddrt_prune_results_before()` through the
 highest `txn_id` just reported to bound memory. `examples/daemon_demo.c` is
 a complete, tested reference implementation of this loop, including a
 mid-stream barrier.
+
+### 4.5 `ddrtiming_sweep`
+
+The commercial use case this tool exists for: change a few DDRC/address-map
+parameters and quickly see how whole-system efficiency moves, without
+hand-editing `config.json` and re-running the CLI once per combination.
+`ddrtiming_sweep` runs the Cartesian product of a set of config-parameter
+overrides ("axes") against one fixed set of AXI logs, and reports the
+requested `SummaryStats` metrics (§5.1) per point as a table -- a
+bankgroup-bit-position mistake that once took an afternoon to notice is one
+visibly-different row here.
+
+```
+ddrtiming_sweep --spec <sweep.json> --out <report.csv> [--jobs N] [--baseline-index N]
+```
+
+| flag | meaning |
+|---|---|
+| `--spec PATH` | sweep spec JSON (required, format below) |
+| `--out PATH.csv` | output CSV path (required); a sibling `PATH.json` is written alongside it |
+| `--jobs N` | worker threads (default: `std::thread::hardware_concurrency()`) -- points are independent (a fresh `Engine` per point, no shared state) and run on a simple thread pool |
+| `--baseline-index N` | also emit `<metric>_delta_pct` columns relative to point `N` (0-based, in the enumeration order below) |
+
+**Spec format:**
+
+```json
+{
+  "base_config": "bench/llama_decode_4c/config.json",
+  "logs": ["bench/llama_decode_4c/core0.csv", "bench/llama_decode_4c/core1.csv",
+           "bench/llama_decode_4c/core2.csv", "bench/llama_decode_4c/core3.csv"],
+  "axes": {
+    "address_mapping.bankgroup.bit_start": [6, 13],
+    "ddrc_resources.max_outstanding_per_id": [16, 64]
+  },
+  "report": ["bandwidth_utilization_pct", "row_conflict_rate_pct", "bankgroup_reuse_rate_pct", "avg_latency_ns"]
+}
+```
+
+| field | meaning |
+|---|---|
+| `base_config` | path to the starting `config.json`, resolved relative to the spec file's own directory first, falling back to the current working directory |
+| `logs` | AXI log CSVs (§4.2), same for every point; `logs[i]` gets `core_id = i`, exactly like `ddrtiming_cli --log`'s positional rule; barrier rows are honored. Resolved the same spec-dir-then-cwd way as `base_config` |
+| `axes` | `{"dot.separated.path": [value, value, ...]}` -- each path is set into a copy of `base_config`'s JSON tree (creating any missing intermediate object along the way, so a field absent from the base config, e.g. introducing `address_mapping.bankgroup.bits`, can still be swept). A value may be a number, string, or array. The full sweep is the Cartesian product of every axis's value list, enumerated with the **first axis slowest-varying** (standard row-major order: the last axis changes on every point, the first axis changes only every `product(later axis sizes)` points) |
+| `report` | optional list of `SummaryStats` field names (§5.1) to include as columns. Omit it to get every scalar field of `SummaryStats`, in the order declared in `src/core/engine.hpp` (`total_txns` through `high_address_regions`) |
+
+**Per point:** the base config JSON is deep-copied, this point's axis
+overrides are applied, and the result is written to
+`<out_dir>/.sweep_tmp/point_<N>.json` and loaded with
+`DdrcConfig::load_from_file()` -- so config validation (§4.3) runs exactly
+as it does for the CLI. A point whose overridden config fails validation
+does **not** abort the sweep: it becomes a row with its `error` column
+filled in and every metric left blank, since an unrealizable corner of the
+design space is itself a useful sweep result. Only a problem with the spec
+or its I/O (a malformed spec, a missing `base_config`/log file, an
+unwritable `--out` path, an out-of-range `--baseline-index`) is a hard
+error -- those exit `1` before any point runs; a sweep where every point ran
+(regardless of how many carry an `error`) exits `0`.
+
+**Output**, three forms of the same data:
+
+- `--out <report.csv>`: one row per point, columns = one per axis (header =
+  the exact axis path) in spec order, then one per `report` metric, then
+  (only with `--baseline-index`) one `<metric>_delta_pct` per metric
+  relative to the baseline point (left blank when the baseline's value for
+  that metric is `0`, or when either row failed validation), then a
+  trailing `error` column. Numbers are printed with `%.6g`.
+- `<report.json>` (same path, `.json` in place of `.csv`): `{"spec": ..., "points": N, "rows": [...]}` --
+  `spec` echoes the input spec verbatim, `points` is the total point count,
+  and `rows` is an array of objects with the same keys as the CSV columns
+  (axis paths, metrics, optional `_delta_pct` fields, `error`), metrics
+  as real JSON numbers (`null` when a point failed) rather than formatted text.
+- stdout: the same axis + metric columns as a compact aligned table (plus
+  `error`, since a human scanning the table needs *some* indication a blank
+  row's metrics are blank because that point failed validation, not because
+  they were all zero) -- printed unconditionally so a human running the
+  sweep sees the result immediately, without needing to open the CSV.
 
 ## 5. Output Spec
 

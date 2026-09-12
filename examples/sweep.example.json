@@ -1,0 +1,10 @@
+{
+  "base_config": "bench/llama_decode_4c/config.json",
+  "logs": ["bench/llama_decode_4c/core0.csv", "bench/llama_decode_4c/core1.csv",
+           "bench/llama_decode_4c/core2.csv", "bench/llama_decode_4c/core3.csv"],
+  "axes": {
+    "address_mapping.bankgroup.bit_start": [6, 13],
+    "ddrc_resources.max_outstanding_per_id": [16, 64]
+  },
+  "report": ["bandwidth_utilization_pct", "row_conflict_rate_pct", "bankgroup_reuse_rate_pct", "avg_latency_ns"]
+}

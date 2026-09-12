@@ -75,3 +75,24 @@ set_tests_properties(windowed_history_analyze_baseline_smoke PROPERTIES
 # between runs, not to assert the numbers are physically correct.
 add_test(NAME golden_check
          COMMAND golden_check --bench-root ${CMAKE_CURRENT_SOURCE_DIR}/bench)
+
+# ---------------------------------------------------------------------------
+# ddrtiming_sweep: parameter-sweep tool (tools/ddrtiming_sweep.cpp). Runs the
+# Cartesian product of a sweep spec's config-parameter "axes" against a fixed
+# set of AXI logs and reports the requested SummaryStats metrics per point.
+# See README S4.5 for the spec format, CLI flags, and output columns.
+# ---------------------------------------------------------------------------
+add_executable(ddrtiming_sweep tools/ddrtiming_sweep.cpp)
+target_link_libraries(ddrtiming_sweep PRIVATE ddrtiming Threads::Threads)
+
+# examples/sweep.example.json's base_config/logs paths are written relative
+# to the repo root (matching README S4.5's own spec example verbatim), so
+# this test needs WORKING_DIRECTORY set explicitly -- ctest's own default
+# working directory is the build tree, not the source tree.
+add_test(NAME ddrtiming_sweep_smoke
+         COMMAND ddrtiming_sweep
+                 --spec ${CMAKE_CURRENT_SOURCE_DIR}/examples/sweep.example.json
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/sweep_smoke_report.csv)
+set_tests_properties(ddrtiming_sweep_smoke PROPERTIES
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    PASS_REGULAR_EXPRESSION "bankgroup_reuse_rate_pct")
