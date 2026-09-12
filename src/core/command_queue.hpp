@@ -33,6 +33,31 @@ struct ChannelStats {
     uint64_t row_miss_hidden = 0;
     uint64_t row_miss_exposed = 0;
     uint64_t row_miss_exposed_cycles = 0;
+
+    // [S] bus-time attribution: a closed budget over this channel's data-bus
+    // timeline. Walking that timeline, every cycle is either a data burst
+    // (busy_cycles above) or a bubble between one burst ending and the next
+    // one starting; each bubble is charged in full to whichever constraint
+    // was the binding floor on that command's column-command cycle (ties
+    // broken by the precedence in drain_one). Engine::compute_summary() adds
+    // the channel's trailing idle -- from its last burst to the run's
+    // total_cycles -- to attr_frontend_idle_cycles, after which
+    // busy_cycles + every attr_* below sums to exactly total_cycles.
+    //
+    // Deliberately separate counters from refresh_cycles/turnaround_cycles
+    // above: those measure "delay this constraint added to a command" (and
+    // are what refresh_overhead_pct/turnaround_overhead_pct report), which
+    // double-counts when several constraints delay the same command. These
+    // partition bus time instead, so they add up.
+    uint64_t attr_refresh_cycles = 0;
+    uint64_t attr_row_miss_cycles = 0;
+    uint64_t attr_twtr_cycles = 0;
+    uint64_t attr_turnaround_cycles = 0;
+    uint64_t attr_tccd_l_excess_cycles = 0;
+    uint64_t attr_frontend_idle_cycles = 0;
+    uint64_t attr_other_cycles = 0;
+    // End of this channel's last data burst, for the trailing-idle term.
+    uint64_t last_data_end_cycle = 0;
 };
 
 // Per-channel DDRC scheduler: bounded command queue (backpressure), genuine
@@ -190,6 +215,10 @@ private:
 
     int peek_priority(const DramCommand& cmd) const; // 0=hit, 1=idle/never-opened bank, 2=conflict
     uint64_t bank_key_of(const DramCommand& cmd) const;
+    // [S] Cycle at which the next selection is considered to happen; only
+    // commands whose ready_cycle has passed it are candidates. See the
+    // definition in command_queue.cpp.
+    uint64_t decision_cycle() const;
     size_t pick_best_index() const;
     uint64_t apply_refresh_if_due(uint32_t rank_idx, uint64_t earliest_cycle);
     uint64_t apply_activate_gating(RankState& rk, uint32_t bankgroup, uint64_t cycle);

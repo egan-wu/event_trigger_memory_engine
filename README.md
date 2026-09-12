@@ -326,6 +326,36 @@ yet (`ddrt_get_num_cores() == 0`).
 | `turnaround_overhead_pct` | % of total channel-cycles spent on R↔W bus turnaround |
 | `mapped_address_bits` | how many low-order address bits the address map actually decodes |
 | `high_address_regions` | distinct values seen of the bits *above* `mapped_address_bits`. `1` is normal; `>1` means separate parts of the trace alias onto the same DRAM locations and every rate above is describing a workload that doesn't exist — fix the trace's base addresses or widen the mapping before trusting anything else here |
+| `bus_time_attribution` (JSON object; `attr_*_pct` in the C struct) | where the run's channel-time went — see below |
+
+#### Bus-time attribution
+
+`summary.bus_time_attribution` partitions `channels × total_cycles` into
+eight shares that **sum to 100%**: `data_pct`, `row_miss_exposed_pct`,
+`refresh_pct`, `turnaround_pct`, `twtr_pct`, `tccd_l_excess_pct`,
+`frontend_idle_pct`, `other_pct`. Walking each channel's data-bus timeline,
+every cycle is either a data burst or a bubble, and each bubble is charged
+to the one constraint that actually set that command's column-command cycle
+(refresh taking its share first, since a refresh that lands mid-placement
+pushes the row operations that follow it). The channel's trailing idle —
+from its last burst to the end of the run — goes to `frontend_idle_pct`.
+
+This is a different measurement from `refresh_overhead_pct` /
+`turnaround_overhead_pct` above, which report how much delay each of those
+constraints added to individual commands: those can overlap each other and
+can exceed the bubble that actually appeared on the bus. The attribution
+shares cannot, which is what makes them readable as a budget — the largest
+non-`data` entry is where the bandwidth went.
+
+| share | what it means, and what moves it |
+|---|---|
+| `data_pct` | real data bursts; equals `bandwidth_utilization_pct` |
+| `row_miss_exposed_pct` | PRE/ACT/tRCD that could not be hidden behind other banks' transfers — more bank-level parallelism, a different page policy, or fewer conflicts |
+| `refresh_pct` | tRFC blocking; a fixed cost of `tREFI`/`tRFC`, not addressable by the address map |
+| `turnaround_pct` / `twtr_pct` | R↔W bus direction changes and write-to-read DRAM recovery — driven by how finely reads and writes interleave |
+| `tccd_l_excess_pct` | the extra spacing paid because a column command followed another in the *same* bank group; pure address-mapping cost (see `bankgroup_reuse_rate_pct`) |
+| `frontend_idle_pct` | the bus had nothing to do: `max_outstanding_per_id`, barriers, or a workload that simply doesn't ask for this much bandwidth |
+| `other_pct` | command-bus slot contention and a bank's own column pipeline |
 
 No per-channel/per-bank breakdown at the summary level (everything above is
 summed across all channels/banks) — use windowed history (§5.3) for that.
@@ -475,12 +505,23 @@ cutoff.
 4. For anything beyond a single number — trends, outliers, before/after — don't parse `history.csv` directly: run `windowed_history_analyze --csv history.csv [--baseline other.csv] --out analysis.json` (§5.4) and read that. Its output size is bounded regardless of trace length, and `extremes` hands you the exact window to go inspect instead of you having to scan for it.
 5. Check `summary.high_address_regions` before trusting any hit/conflict/bandwidth number from step 3 — `>1` means the input trace itself aliases onto overlapping DRAM locations, and every other field describes a workload that doesn't exist (§5.1).
 
+**Start with `summary.bus_time_attribution` (§5.1).** It partitions the
+run's channel-time into eight shares that sum to 100%, so the largest
+non-`data` share names the mechanism to go after before any hypothesis is
+needed — `tccd_l_excess_pct` points at the address map, `twtr_pct` at the
+read/write interleave, `row_miss_exposed_pct` at bank parallelism or page
+policy, `frontend_idle_pct` away from DRAM entirely. The table below then
+tells you which knob moves that mechanism.
+
 **Reading a lower-than-expected `bandwidth_utilization_pct`** — the fields
 below name independent mechanisms the engine actually implements, so they
 can be read as a triage order rather than guessed at:
 
 | observation | look at next | indicates |
 |---|---|---|
+| `bus_time_attribution.tccd_l_excess_pct` large | `bankgroup_reuse_rate_pct` | the bank-group field is not the fastest-changing one in `address_mapping` (§4.3) |
+| `bus_time_attribution.twtr_pct` large | the workload's R/W interleave | reads and writes alternate too finely for the DRAM's write-to-read recovery |
+| `bus_time_attribution.frontend_idle_pct` large | `outstanding_occupancy_pct` | the limit is upstream of DRAM (outstanding cap, barriers, or the workload itself) |
 | `outstanding_occupancy_pct` pinned near 100% | — | `max_outstanding_per_id` itself is the limiter, not DRAM |
 | `outstanding_occupancy_pct` low | `bank_utilization_pct` | rules out the outstanding cap |
 | `bank_utilization_pct` also low | — | address-mapping spread problem: traffic is landing on too few physical banks |

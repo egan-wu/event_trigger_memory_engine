@@ -45,6 +45,17 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     summary.set("bankgroup_reuse_rate_pct", s.bankgroup_reuse_rate_pct);
     summary.set("mapped_address_bits", static_cast<int64_t>(s.mapped_address_bits));
     summary.set("high_address_regions", static_cast<int64_t>(s.high_address_regions));
+    // [S] bus-time attribution -- a closed budget, these eight sum to 100%.
+    json::Value attr = json::Value::make_object();
+    attr.set("data_pct", s.attr_data_pct);
+    attr.set("row_miss_exposed_pct", s.attr_row_miss_exposed_pct);
+    attr.set("refresh_pct", s.attr_refresh_pct);
+    attr.set("turnaround_pct", s.attr_turnaround_pct);
+    attr.set("twtr_pct", s.attr_twtr_pct);
+    attr.set("tccd_l_excess_pct", s.attr_tccd_l_excess_pct);
+    attr.set("frontend_idle_pct", s.attr_frontend_idle_pct);
+    attr.set("other_pct", s.attr_other_pct);
+    summary.set("bus_time_attribution", std::move(attr));
 
     json::Value txns = json::Value::make_array();
     for (const auto& r : engine.results()) {
@@ -163,6 +174,17 @@ std::string format_summary_text(const Engine& engine) {
     os << "Bank-group reuse rate:   " << s.bankgroup_reuse_rate_pct << " % (tCCD_L instead of tCCD_S)\n";
     os << "Address map decodes:     bits [0, " << s.mapped_address_bits << ")  -- "
        << s.high_address_regions << " distinct region(s) above that\n";
+
+    // [S] bus-time attribution: a closed budget over channel-time, so the
+    // largest non-data entry names what the bandwidth was spent on.
+    os << "Bus time went to:        " << s.attr_data_pct << " % data\n";
+    os << "  row miss (exposed):    " << s.attr_row_miss_exposed_pct << " %\n";
+    os << "  refresh:               " << s.attr_refresh_pct << " %\n";
+    os << "  R/W turnaround:        " << s.attr_turnaround_pct << " %\n";
+    os << "  tWTR:                  " << s.attr_twtr_pct << " %\n";
+    os << "  tCCD_L excess:         " << s.attr_tccd_l_excess_pct << " %\n";
+    os << "  front-end idle:        " << s.attr_frontend_idle_pct << " %\n";
+    os << "  other:                 " << s.attr_other_pct << " %\n";
 
     // Second block: everything that's broken out per-core, each stat
     // category as its own labeled sub-table (one line per core) under this

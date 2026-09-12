@@ -53,6 +53,23 @@ struct SummaryStats {
     // has been pushed or nothing is mapped.
     int mapped_address_bits = 0;
     uint64_t high_address_regions = 0;
+
+    // [S] bus-time attribution: where the run's channel-time went, as
+    // percentages of (channels * total_cycles). These eight partition that
+    // budget -- every cycle is charged to exactly one cause -- so they sum
+    // to 100% and can be read directly as "the largest non-data entry is
+    // what cost the bandwidth". Distinct from refresh_overhead_pct /
+    // turnaround_overhead_pct above, which measure the delay each of those
+    // constraints added to individual commands and can therefore overlap
+    // each other and exceed the bubble that actually appeared on the bus.
+    double attr_data_pct = 0.0;              // data bursts on the bus
+    double attr_row_miss_exposed_pct = 0.0;  // PRE/ACT/tRCD not hidden behind other banks
+    double attr_refresh_pct = 0.0;
+    double attr_turnaround_pct = 0.0;        // R<->W bus direction changes
+    double attr_twtr_pct = 0.0;              // write-to-read DRAM recovery
+    double attr_tccd_l_excess_pct = 0.0;     // tCCD_L paid where tCCD_S would have done
+    double attr_frontend_idle_pct = 0.0;     // bus waited for a command to arrive
+    double attr_other_pct = 0.0;             // command-bus slots, same-bank column pipeline
 };
 
 // Distribution of AXI burst sizes (logical bytes requested per transaction,

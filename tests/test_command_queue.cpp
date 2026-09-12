@@ -340,12 +340,18 @@ DDRTEST(fr_fcfs_prefers_a_ready_hit_over_an_older_conflict) {
     // a Conflict -- expensive: precharge+activate), then a NEWER command
     // that targets bank0's SAME open row (a Hit -- cheap), both before
     // draining either.
+    // Both are visible to the controller at the same cycle -- "older" here
+    // means earlier in the queue's arrival order (seq), which is what FCFS
+    // would go by. Admitting them at different ready_cycles instead would
+    // test something else entirely: a command that has not arrived yet is
+    // not a candidate at all (see arbitration_ignores_a_command_that_has_
+    // not_arrived_yet below).
     DramCommand older_conflict = make_cmd(TxnType::Read, 0, 0, 0, /*row=*/1);
     DramCommand newer_hit = make_cmd(TxnType::Read, 0, 0, 0, /*row=*/0);
     sched.try_admit(older_conflict, 10);
-    sched.try_admit(newer_hit, 20);
+    sched.try_admit(newer_hit, 10);
 
-    // FR-FCFS must pick the hit first, even though it arrived later.
+    // FR-FCFS must pick the hit first, even though it is the newer arrival.
     DramCommand first = sched.drain_one();
     DDR_CHECK(first.row_status == RowStatus::Hit);
     DDR_CHECK_EQ(first.addr.row, 0u);
@@ -353,6 +359,84 @@ DDRTEST(fr_fcfs_prefers_a_ready_hit_over_an_older_conflict) {
     DramCommand second = sched.drain_one();
     DDR_CHECK(second.row_status == RowStatus::Conflict);
     DDR_CHECK_EQ(second.addr.row, 1u);
+}
+
+DDRTEST(arbitration_ignores_a_command_that_has_not_arrived_yet) {
+    // Time-consistent arbitration: drain_one() is called lazily, so the
+    // queue can hold a command whose front-end issue time is still in the
+    // future. Preferring it because it happens to be a page hit would
+    // service work the controller cannot see yet AND floor the command that
+    // is genuinely waiting behind that future cycle.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 1; cfg.tRRD_L = 1; cfg.tFAW = 0;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // Opens bank0 row 0: ACT at 0, column at tRCD = 5, so the channel's
+    // decision cycle for the next pick is 5 + tCCD_S(1) = 6.
+    admit_and_drain(sched, make_cmd(TxnType::Read, 0, 0, 0, 0), 0);
+
+    sched.try_admit(make_cmd(TxnType::Read, 0, 0, 0, /*row=*/1), 10); // conflict, here at 10
+    sched.try_admit(make_cmd(TxnType::Read, 0, 0, 0, /*row=*/0), 20); // hit, but not until 20
+
+    // Decision cycle is max(6, oldest arrival 10) = 10, so only the
+    // conflict is a candidate -- the hit has not arrived.
+    DramCommand first = sched.drain_one();
+    DDR_CHECK_EQ(first.addr.row, 1u);
+    DDR_CHECK(first.row_status == RowStatus::Conflict);
+
+    // ...and servicing it closes row 0, so the second command is no longer
+    // a hit either. PRE floors on bank recovery: tRAS from the ACT at 0 is
+    // 10, but the command bus slot at 5 (the first column command) pushes
+    // PRE to 7; ACT at 7 + tRP(5) = 12; column at 12 + tRCD(5) = 17.
+    // Second command: PRE floors on its own bank recovery, tRAS since the
+    // ACT at 12 -> 22... but precharge_ready is max(col_start 17 + tRTP 0,
+    // 12 + tRAS 10) = 22, wait -- row_opened_at is 12, so 12+10 = 22.
+    DramCommand second = sched.drain_one();
+    DDR_CHECK_EQ(second.addr.row, 0u);
+    DDR_CHECK(second.row_status == RowStatus::Conflict);
+    DDR_CHECK(second.start_cycle >= 20ull); // could not possibly precede its own arrival
+}
+
+DDRTEST(starvation_does_not_promote_a_command_that_has_not_arrived) {
+    // A command still sitting in the queue accumulates skip_count whether or
+    // not it has arrived, so the starvation override has to be evaluated
+    // inside the arrived set too -- otherwise a far-future command gets
+    // force-promoted and drags the whole channel forward to an arrival that
+    // has not happened.
+    DdrcConfig cfg = base_config();
+    cfg.tCL = 0; cfg.tCWL = 0;
+    cfg.tRCD = 5; cfg.tRP = 5; cfg.tRAS = 10; cfg.tRC = 15;
+    cfg.tCCD_S = 1; cfg.tCCD_L = 1; cfg.tRRD_S = 0; cfg.tRRD_L = 0; cfg.tFAW = 0;
+    cfg.tWTR_S = 0; cfg.tWTR_L = 0; cfg.tRTP = 0; cfg.tWR = 0;
+    cfg.tREFI = 1000000; cfg.tRFC = 0;
+    cfg.rd_wr_turnaround = 0; cfg.wr_rd_turnaround = 0;
+    ChannelScheduler sched(cfg, 0);
+
+    // A lone command on bank 1 that will not arrive for a very long time,
+    // admitted first so it is the oldest by seq and ages fastest.
+    sched.try_admit(make_cmd(TxnType::Read, 0, 0, /*bank=*/1, 0), 100000);
+    // Plenty of work on bank 0 that is available immediately.
+    for (int i = 0; i < 20; ++i) {
+        sched.try_admit(make_cmd(TxnType::Read, 0, 0, /*bank=*/0, 0), 0);
+    }
+
+    // kStarvationLimit is 16, so without the arrival check the bank-1
+    // command would be force-promoted around the 17th pick.
+    for (int i = 0; i < 20; ++i) {
+        DramCommand c = sched.drain_one();
+        DDR_CHECK_EQ(c.addr.bank, 0u);
+        DDR_CHECK(c.start_cycle < 100000ull);
+    }
+    // It is still there, and only now -- with nothing else to choose -- is
+    // it serviced, no earlier than its own arrival.
+    DramCommand last = sched.drain_one();
+    DDR_CHECK_EQ(last.addr.bank, 1u);
+    DDR_CHECK(last.start_cycle >= 100000ull);
 }
 
 DDRTEST(column_spacing_on_page_hits_is_tccd_not_trtp) {

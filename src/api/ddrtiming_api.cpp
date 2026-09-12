@@ -134,6 +134,15 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     out->bankgroup_reuse_rate_pct = s.bankgroup_reuse_rate_pct;
     out->mapped_address_bits = s.mapped_address_bits;
     out->high_address_regions = s.high_address_regions;
+    /* [S] bus-time attribution */
+    out->attr_data_pct = s.attr_data_pct;
+    out->attr_row_miss_exposed_pct = s.attr_row_miss_exposed_pct;
+    out->attr_refresh_pct = s.attr_refresh_pct;
+    out->attr_turnaround_pct = s.attr_turnaround_pct;
+    out->attr_twtr_pct = s.attr_twtr_pct;
+    out->attr_tccd_l_excess_pct = s.attr_tccd_l_excess_pct;
+    out->attr_frontend_idle_pct = s.attr_frontend_idle_pct;
+    out->attr_other_pct = s.attr_other_pct;
     return 0;
 }
 

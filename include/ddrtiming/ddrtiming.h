@@ -64,6 +64,20 @@ typedef struct {
      * the same banks/rows/columns and page-hit rate is overstated. */
     int32_t mapped_address_bits;
     uint64_t high_address_regions;
+    /* [S] bus-time attribution: where the run's channel-time went, as
+     * percentages of (channels * total_cycles). These eight partition that
+     * budget -- every cycle is charged to exactly one cause -- so they sum
+     * to 100% and the largest non-data entry names what cost the bandwidth.
+     * Distinct from refresh_overhead_pct/turnaround_overhead_pct above,
+     * which measure per-command delay and can overlap each other. */
+    double attr_data_pct;
+    double attr_row_miss_exposed_pct;
+    double attr_refresh_pct;
+    double attr_turnaround_pct;
+    double attr_twtr_pct;
+    double attr_tccd_l_excess_pct;
+    double attr_frontend_idle_pct;
+    double attr_other_pct;
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the

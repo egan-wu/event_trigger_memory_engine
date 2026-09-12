@@ -453,6 +453,9 @@ void Engine::compute_summary() {
     uint64_t total_hits = 0, total_conflicts = 0, total_empties = 0;
     uint64_t total_refresh_cycles = 0, total_turnaround_cycles = 0;
     uint64_t total_bankgroup_reuse = 0;
+    // [S] bus-time attribution accumulators -- see SummaryStats.
+    uint64_t attr_data = 0, attr_rowmiss = 0, attr_refresh = 0, attr_turn = 0;
+    uint64_t attr_twtr = 0, attr_tccd = 0, attr_idle = 0, attr_other = 0;
     for (const auto& ch : channels_) {
         const ChannelStats& cs = ch->stats();
         total_hits += cs.hits;
@@ -461,6 +464,21 @@ void Engine::compute_summary() {
         total_refresh_cycles += cs.refresh_cycles;
         total_turnaround_cycles += cs.turnaround_cycles;
         total_bankgroup_reuse += cs.bankgroup_reuse_count;
+
+        attr_data += cs.busy_cycles;
+        attr_rowmiss += cs.attr_row_miss_cycles;
+        attr_refresh += cs.attr_refresh_cycles;
+        attr_turn += cs.attr_turnaround_cycles;
+        attr_twtr += cs.attr_twtr_cycles;
+        attr_tccd += cs.attr_tccd_l_excess_cycles;
+        attr_other += cs.attr_other_cycles;
+        // Trailing idle: from this channel's last data burst to the end of
+        // the run. A channel that finished early was, from the bus's point
+        // of view, waiting for work that never came.
+        uint64_t trailing = (cum_max_complete_cycle_ > cs.last_data_end_cycle)
+                                ? cum_max_complete_cycle_ - cs.last_data_end_cycle
+                                : 0;
+        attr_idle += cs.attr_frontend_idle_cycles + trailing;
     }
 
     uint64_t total_cmds = total_hits + total_conflicts + total_empties;
@@ -475,6 +493,17 @@ void Engine::compute_summary() {
     if (channel_time_budget > 0) {
         s.refresh_overhead_pct = static_cast<double>(total_refresh_cycles) / channel_time_budget * 100.0;
         s.turnaround_overhead_pct = static_cast<double>(total_turnaround_cycles) / channel_time_budget * 100.0;
+
+        // [S] bus-time attribution, as shares of the same channel-time budget.
+        double denom = static_cast<double>(channel_time_budget);
+        s.attr_data_pct = static_cast<double>(attr_data) / denom * 100.0;
+        s.attr_row_miss_exposed_pct = static_cast<double>(attr_rowmiss) / denom * 100.0;
+        s.attr_refresh_pct = static_cast<double>(attr_refresh) / denom * 100.0;
+        s.attr_turnaround_pct = static_cast<double>(attr_turn) / denom * 100.0;
+        s.attr_twtr_pct = static_cast<double>(attr_twtr) / denom * 100.0;
+        s.attr_tccd_l_excess_pct = static_cast<double>(attr_tccd) / denom * 100.0;
+        s.attr_frontend_idle_pct = static_cast<double>(attr_idle) / denom * 100.0;
+        s.attr_other_pct = static_cast<double>(attr_other) / denom * 100.0;
     }
 
     s.mapped_address_bits = mapped_address_bits_;

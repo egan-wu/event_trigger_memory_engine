@@ -60,14 +60,42 @@ uint64_t ChannelScheduler::bank_key_of(const DramCommand& cmd) const {
            bank_idx;
 }
 
-// Selects the index to service next: a starved candidate (skipped too many
-// times) always wins outright; otherwise the best by (priority, arrival
-// order), except a hit on a bank that's already at the pagematch streak
-// limit is skipped in favor of any candidate on a *different* bank, if one
-// is available.
+// [S] The cycle this selection is being made at. A real controller can only
+// choose among commands that have actually reached its queue by the time the
+// channel is free to start another column command. drain_one() here is called
+// lazily (only when a queue slot is needed or at the end of the run -- see
+// Engine::run()), so pending_ can legitimately hold a command whose front-end
+// issue time is far in the future; ranking that one ahead of an
+// already-waiting command would service work the hardware could not yet see,
+// and would then floor the waiting command behind it. So: the earliest cycle
+// this channel could issue another column command (tCCD_S after the last
+// one), floored by the oldest arrival so the candidate set is never empty.
+// Today's eager front end keeps arrivals bunched, so this rarely changes a
+// decision -- it matters once arrival timestamps spread them out.
+uint64_t ChannelScheduler::decision_cycle() const {
+    uint64_t min_ready = ~0ull;
+    for (const auto& p : pending_) min_ready = std::min(min_ready, p.ready_cycle);
+    if (min_ready == ~0ull) return 0;
+    uint64_t now = min_ready;
+    if (had_col_cmd_) now = std::max(now, last_col_start_cycle_ + cyc(cfg_.tCCD_S));
+    return now;
+}
+
+// Selects the index to service next among the commands that have arrived by
+// decision_cycle(): a starved candidate (skipped too many times) always wins
+// outright; otherwise the best by (priority, arrival order), except a hit on
+// a bank that's already at the pagematch streak limit is skipped in favor of
+// any candidate on a *different* bank, if one is available. Starvation is
+// deliberately evaluated inside the eligible set too -- a not-yet-arrived
+// command still accumulates skips, and force-promoting one would drag the
+// whole channel forward to an arrival that hasn't happened.
 size_t ChannelScheduler::pick_best_index() const {
+    uint64_t now = decision_cycle();
+    auto eligible = [&](size_t i) { return pending_[i].ready_cycle <= now; };
+
     long starved = -1;
     for (size_t i = 0; i < pending_.size(); ++i) {
+        if (!eligible(i)) continue;
         if (pending_[i].skip_count >= kStarvationLimit &&
             (starved < 0 || pending_[i].seq < pending_[static_cast<size_t>(starved)].seq)) {
             starved = static_cast<long>(i);
@@ -78,8 +106,11 @@ size_t ChannelScheduler::pick_best_index() const {
     bool streak_at_limit = consecutive_hit_count_ >= kPagematchLimit;
     bool other_bank_available = false;
     if (streak_at_limit) {
-        for (const auto& p : pending_) {
-            if (bank_key_of(p.cmd) != last_hit_bank_key_) { other_bank_available = true; break; }
+        for (size_t i = 0; i < pending_.size(); ++i) {
+            if (eligible(i) && bank_key_of(pending_[i].cmd) != last_hit_bank_key_) {
+                other_bank_available = true;
+                break;
+            }
         }
     }
 
@@ -87,6 +118,7 @@ size_t ChannelScheduler::pick_best_index() const {
     int best_pr = 3;
     uint64_t best_seq = 0;
     for (size_t i = 0; i < pending_.size(); ++i) {
+        if (!eligible(i)) continue;
         int pr = peek_priority(pending_[i].cmd);
         if (streak_at_limit && other_bank_available && pr == 0 && bank_key_of(pending_[i].cmd) == last_hit_bank_key_) {
             continue; // this bank's hit streak must yield to another bank this round
@@ -258,6 +290,22 @@ DramCommand ChannelScheduler::drain_one() {
     // is actually relevant to that branch.
     uint64_t earliest = arrival_cycle;
 
+    // [S] bus-time attribution: remember each floor's own value so the
+    // bubble before this command's data burst can be charged to whichever
+    // one actually bound. 0 means "this constraint did not apply".
+    uint64_t prev_bus_end = bus_used_ ? bus_free_cycle_ : 0;
+    // Refresh blocking is charged to refresh even when a later floor ends up
+    // binding: a REFRESH that lands mid-placement pushes this command's own
+    // PRE/ACT out, so without this the whole bubble -- refresh window
+    // included -- would be billed to the row miss that the refresh itself
+    // caused. stats_.refresh_cycles already accumulates exactly the blocked
+    // cycles across every apply_refresh_if_due() call, so take its delta.
+    uint64_t refresh_cycles_at_entry = stats_.refresh_cycles;
+    uint64_t floor_arrival = arrival_cycle;
+    uint64_t floor_tccd = 0, floor_turn = 0, floor_twtr = 0, floor_refresh = 0;
+    uint64_t floor_rowops = 0;
+    bool tccd_same_bg = false;
+
     // CAS latency (tCL/tCWL): pipeline delay from this command's own column
     // command to when its data actually appears -- needed below to translate
     // a data-bus-timeline constraint (bus_free_cycle_, which tracks when the
@@ -270,7 +318,9 @@ DramCommand ChannelScheduler::drain_one() {
         cmd.bankgroup_reuse = same_bg;
         if (same_bg) stats_.bankgroup_reuse_count++;
         uint64_t min_gap = cyc(same_bg ? cfg_.tCCD_L : cfg_.tCCD_S);
-        earliest = std::max(earliest, last_col_start_cycle_ + min_gap);
+        tccd_same_bg = same_bg;
+        floor_tccd = last_col_start_cycle_ + min_gap;
+        earliest = std::max(earliest, floor_tccd);
     }
     if (bus_used_) {
         // The data bus -- not the command bus -- is the real shared
@@ -289,6 +339,7 @@ DramCommand ChannelScheduler::drain_one() {
             uint64_t turn = cyc(last_bus_type_ == TxnType::Read ? cfg_.rd_wr_turnaround : cfg_.wr_rd_turnaround);
             uint64_t with_turn = bus_free_cycle_ + turn;
             uint64_t min_col_start_for_turn = (with_turn > cas_cycles) ? with_turn - cas_cycles : 0;
+            floor_turn = min_col_start_for_turn;
             if (min_col_start_for_turn > earliest) {
                 stats_.turnaround_cycles += (min_col_start_for_turn - earliest);
                 earliest = min_col_start_for_turn;
@@ -304,7 +355,8 @@ DramCommand ChannelScheduler::drain_one() {
     if (cmd.type == TxnType::Read && had_write_cmd_) {
         bool same_bg = (last_write_bankgroup_ == cmd.addr.bankgroup);
         uint64_t twtr = cyc(same_bg ? cfg_.tWTR_L : cfg_.tWTR_S);
-        earliest = std::max(earliest, last_write_complete_cycle_ + twtr);
+        floor_twtr = last_write_complete_cycle_ + twtr;
+        earliest = std::max(earliest, floor_twtr);
     }
 
     // Sync bank/rank state (row_open, precharge_ready_cycle, refresh cursor)
@@ -317,10 +369,15 @@ DramCommand ChannelScheduler::drain_one() {
     // visible_cycle is a max() over), so refresh boundaries due by
     // visible_cycle are a subset of those due by earliest; syncing to the
     // later point never misses one a row-miss branch below would need.
-    earliest = apply_refresh_if_due(rank_idx, earliest);
+    {
+        uint64_t after_refresh = apply_refresh_if_due(rank_idx, earliest);
+        if (after_refresh > earliest) floor_refresh = after_refresh; // [S] refresh was the binding floor
+        earliest = after_refresh;
+    }
 
     RowStatus status;
     uint64_t col_start;
+    uint64_t pre_slot_col_start = 0; // [S] col_start before command-bus slot contention
     if (!bank.row_open) {
         status = RowStatus::Empty;
         // FIX (this rewrite, item 1): PRE/ACT are NOT gated by `earliest`
@@ -359,10 +416,12 @@ DramCommand ChannelScheduler::drain_one() {
             stats_.row_miss_exposed++;
             stats_.row_miss_exposed_cycles += (row_ready_checked - earliest);
         }
+        floor_rowops = row_ready_checked; // [S]
         col_start = std::max(earliest, row_ready_checked);
         bank.row_open = true;
         bank.open_row = cmd.addr.row;
         bank.row_opened_at_cycle = act_start;
+        pre_slot_col_start = col_start; // [S]
         col_start = reserve_cmd_slot(col_start);
     } else if (bank.open_row == cmd.addr.row) {
         status = RowStatus::Hit;
@@ -373,6 +432,7 @@ DramCommand ChannelScheduler::drain_one() {
         // for another column op -- NOT by tRTP/tWR, which are
         // precharge-only constraints and must not leak in here (see FIX 1).
         col_start = std::max(earliest, bank.col_ready_cycle);
+        pre_slot_col_start = col_start; // [S]
         col_start = reserve_cmd_slot(col_start);
     } else {
         status = RowStatus::Conflict;
@@ -392,10 +452,12 @@ DramCommand ChannelScheduler::drain_one() {
             stats_.row_miss_exposed++;
             stats_.row_miss_exposed_cycles += (row_ready_checked - earliest);
         }
+        floor_rowops = row_ready_checked; // [S]
         col_start = std::max(earliest, row_ready_checked);
         bank.row_open = true;
         bank.open_row = cmd.addr.row;
         bank.row_opened_at_cycle = act_start;
+        pre_slot_col_start = col_start; // [S]
         col_start = reserve_cmd_slot(col_start);
     }
 
@@ -411,6 +473,56 @@ DramCommand ChannelScheduler::drain_one() {
     // NOT follow it -- tCL/tCWL is pipeline latency, not a throughput limit.
     uint64_t data_start = col_start + cas_cycles;
     uint64_t complete = data_start + transfer_cycles;
+
+    // [S] bus-time attribution. Charge the bubble between the previous data
+    // burst on this channel and this one: whatever the command-bus slot
+    // search added on top of the constraint floors is command-bus
+    // contention, and the rest belongs to the single highest floor -- the
+    // one that actually set col_start, not merely one that was satisfied.
+    // The data-bus floor never appears here by construction: when it binds,
+    // this command's data starts exactly where the previous burst ended, so
+    // the bubble is zero.
+    {
+        uint64_t slot_push = col_start - pre_slot_col_start;
+        uint64_t base_start = pre_slot_col_start + cas_cycles;
+        uint64_t base_gap = (base_start > prev_bus_end) ? base_start - prev_bus_end : 0;
+        stats_.attr_other_cycles += slot_push;
+
+        // Refresh first, capped at the bubble that actually appeared (the
+        // per-call sum can exceed it when several placement steps each hit
+        // the same refresh window).
+        uint64_t refresh_part = std::min(base_gap, stats_.refresh_cycles - refresh_cycles_at_entry);
+        stats_.attr_refresh_cycles += refresh_part;
+        base_gap -= refresh_part;
+
+        const uint64_t f = pre_slot_col_start;
+        if (base_gap > 0) {
+            if (floor_refresh > 0 && floor_refresh == f) {
+                stats_.attr_refresh_cycles += base_gap;
+            } else if (floor_rowops > 0 && floor_rowops == f) {
+                stats_.attr_row_miss_cycles += base_gap;
+            } else if (floor_twtr > 0 && floor_twtr == f) {
+                stats_.attr_twtr_cycles += base_gap;
+            } else if (floor_turn > 0 && floor_turn == f) {
+                stats_.attr_turnaround_cycles += base_gap;
+            } else if (floor_tccd > 0 && floor_tccd == f) {
+                // Only the tCCD_L-over-tCCD_S part is a bank-group-ordering
+                // cost; the tCCD_S spacing would have applied either way.
+                uint64_t excess = 0;
+                if (tccd_same_bg) {
+                    uint64_t l = cyc(cfg_.tCCD_L), s = cyc(cfg_.tCCD_S);
+                    excess = std::min(base_gap, (l > s) ? l - s : 0);
+                }
+                stats_.attr_tccd_l_excess_cycles += excess;
+                stats_.attr_other_cycles += base_gap - excess;
+            } else if (floor_arrival == f) {
+                stats_.attr_frontend_idle_cycles += base_gap;
+            } else {
+                stats_.attr_other_cycles += base_gap; // incl. the bank's own column pipeline
+            }
+        }
+        stats_.last_data_end_cycle = complete;
+    }
 
     // col_ready_cycle: this bank's own column pipeline is occupied for the
     // duration of the transfer -- measured from col_start, not data_start,
