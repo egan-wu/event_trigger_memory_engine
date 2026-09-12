@@ -188,6 +188,12 @@ const std::vector<std::string>& all_summary_fields() {
         "page_hit_rate_pct", "row_conflict_rate_pct", "row_empty_rate_pct",
         "refresh_overhead_pct", "turnaround_overhead_pct", "bankgroup_reuse_rate_pct",
         "mapped_address_bits", "high_address_regions",
+        // Bus-time attribution: these are what make a sweep readable as
+        // "this parameter moved N% of bus time from X to Y" rather than
+        // just "bandwidth went up".
+        "attr_data_pct", "attr_row_miss_exposed_pct", "attr_refresh_pct",
+        "attr_turnaround_pct", "attr_twtr_pct", "attr_tccd_l_excess_pct",
+        "attr_frontend_idle_pct", "attr_other_pct", "rw_direction_switches",
     };
     return fields;
 }
@@ -212,6 +218,15 @@ bool get_summary_field(const SummaryStats& s, const std::string& name, double& o
     if (name == "bankgroup_reuse_rate_pct") { out = s.bankgroup_reuse_rate_pct; return true; }
     if (name == "mapped_address_bits") { out = static_cast<double>(s.mapped_address_bits); return true; }
     if (name == "high_address_regions") { out = static_cast<double>(s.high_address_regions); return true; }
+    if (name == "attr_data_pct") { out = s.attr_data_pct; return true; }
+    if (name == "attr_row_miss_exposed_pct") { out = s.attr_row_miss_exposed_pct; return true; }
+    if (name == "attr_refresh_pct") { out = s.attr_refresh_pct; return true; }
+    if (name == "attr_turnaround_pct") { out = s.attr_turnaround_pct; return true; }
+    if (name == "attr_twtr_pct") { out = s.attr_twtr_pct; return true; }
+    if (name == "attr_tccd_l_excess_pct") { out = s.attr_tccd_l_excess_pct; return true; }
+    if (name == "attr_frontend_idle_pct") { out = s.attr_frontend_idle_pct; return true; }
+    if (name == "attr_other_pct") { out = s.attr_other_pct; return true; }
+    if (name == "rw_direction_switches") { out = static_cast<double>(s.rw_direction_switches); return true; }
     return false;
 }
 
