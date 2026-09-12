@@ -19,7 +19,20 @@ bool ChannelScheduler::has_room() const {
 
 bool ChannelScheduler::try_admit(const DramCommand& cmd, uint64_t ready_cycle) {
     if (!has_room()) return false;
-    pending_.push_back(PendingCmd{cmd, ready_cycle, next_seq_++});
+    // Lookahead visibility: this controller can only prepare a row for a
+    // command actually sitting in its queue. The engine admits lazily --
+    // when the queue is full, Engine::run() drains one command (freeing a
+    // slot) and only then admits the new one -- so this command cannot have
+    // been visible (in the sense of "known well enough to speculatively
+    // ACT for") any earlier than the col_start of whatever command this
+    // channel most recently drained. We measure against col_start (not the
+    // drained command's own arrival) specifically because a queue slot
+    // frees at the moment its occupant issues, and issue == col_start; using
+    // that makes this floor conservative (it can only be >= the true
+    // moment a slot freed), which is the safe side to err on.
+    uint64_t visible_cycle = std::max(ready_cycle, last_drain_col_start_);
+    pending_.push_back(PendingCmd{cmd, ready_cycle, visible_cycle, next_seq_++});
+    last_admitted_ready_cycle_ = std::max(last_admitted_ready_cycle_, ready_cycle);
     return true;
 }
 
@@ -135,6 +148,76 @@ uint64_t ChannelScheduler::apply_activate_gating(RankState& rk, uint32_t bankgro
     return cycle;
 }
 
+uint64_t ChannelScheduler::reserve_cmd_slot(uint64_t desired) {
+    uint64_t candidate = desired;
+    for (;;) {
+        uint64_t lo = (candidate >= kCmdSlotCycles) ? candidate - kCmdSlotCycles + 1 : 0;
+        auto it = cmd_bus_slots_.lower_bound(lo);
+        bool moved = false;
+        // Any already-reserved slot starting in (candidate-K, candidate+K)
+        // overlaps [candidate, candidate+K) -- push candidate past it and
+        // recheck, since that can in turn overlap a later slot.
+        while (it != cmd_bus_slots_.end() && *it < candidate + kCmdSlotCycles) {
+            candidate = *it + kCmdSlotCycles;
+            moved = true;
+            lo = (candidate >= kCmdSlotCycles) ? candidate - kCmdSlotCycles + 1 : 0;
+            it = cmd_bus_slots_.lower_bound(lo);
+        }
+        if (!moved) break;
+    }
+    cmd_bus_slots_.insert(candidate);
+    return candidate;
+}
+
+void ChannelScheduler::prune_cmd_bus_slots() {
+    // Safe pruning horizon: no future reserve_cmd_slot() call can ever pass
+    // a `desired` argument smaller than this. Two sources of future calls:
+    //   - a command still sitting in pending_: its own ready_cycle is
+    //     already fixed and known (it's the smallest possible floor for
+    //     either its column command, which floors on ready_cycle, or its
+    //     PRE/ACT, which floor on visible_cycle >= ready_cycle);
+    //   - a command not yet admitted: try_admit() has never been called
+    //     with a ready_cycle smaller than any it's already seen (see
+    //     last_admitted_ready_cycle_'s comment), so the next one it does
+    //     see is >= last_admitted_ready_cycle_.
+    // Taking the min over both gives a safe (if not maximally tight) lower
+    // bound. A slot's reserved interval is [start, start+kCmdSlotCycles); if
+    // that end is <= the horizon, every future desired argument is >= the
+    // slot's end, so it can never overlap that slot again -- safe to drop.
+    uint64_t horizon = last_admitted_ready_cycle_;
+    for (const auto& p : pending_) horizon = std::min(horizon, p.ready_cycle);
+    while (!cmd_bus_slots_.empty() && *cmd_bus_slots_.begin() + kCmdSlotCycles <= horizon) {
+        cmd_bus_slots_.erase(cmd_bus_slots_.begin());
+    }
+}
+
+uint64_t ChannelScheduler::place_precharge(uint32_t rank_idx, uint64_t floor_cycle) {
+    uint64_t pre_start = apply_refresh_if_due(rank_idx, floor_cycle);
+    return reserve_cmd_slot(pre_start);
+}
+
+uint64_t ChannelScheduler::place_activate(uint32_t rank_idx, uint32_t bankgroup, uint64_t floor_cycle) {
+    RankState& rk = ranks_[rank_idx];
+    // (a) ACT itself must not fall before/inside a currently-due refresh.
+    uint64_t act_start = apply_refresh_if_due(rank_idx, floor_cycle);
+    // (b) tRRD/tFAW spacing -- the single authoritative call; it records
+    // this activate into rk.recent_activates for future spacing checks.
+    act_start = apply_activate_gating(rk, bankgroup, act_start);
+    // (c) tRRD/tFAW may have pushed act_start into a refresh window that
+    // wasn't due yet at (a)'s smaller floor_cycle -- recheck.
+    act_start = apply_refresh_if_due(rank_idx, act_start);
+    // (d) command-bus contention may push it later still.
+    act_start = reserve_cmd_slot(act_start);
+    // (c) and (d) can each move act_start later than the value (b) recorded
+    // into rk.recent_activates -- correct that record to the final placement
+    // so a later tRRD/tFAW check isn't under-constrained by a stale, earlier
+    // timestamp. Pushing later can only make an already-satisfied minimum-
+    // gap constraint MORE satisfied, never violate one, so nothing else
+    // needs revisiting.
+    rk.recent_activates.back() = act_start;
+    return act_start;
+}
+
 DramCommand ChannelScheduler::drain_one() {
     size_t best = pick_best_index();
 
@@ -160,13 +243,13 @@ DramCommand ChannelScheduler::drain_one() {
 
     DramCommand cmd = pending_[best].cmd;
     uint64_t arrival_cycle = pending_[best].ready_cycle;
+    uint64_t visible_cycle = pending_[best].visible_cycle;
     pending_.erase(pending_.begin() + static_cast<long>(best));
 
     uint32_t rank_idx = cmd.addr.rank % static_cast<uint32_t>(ranks_.size());
     uint32_t bg_idx = cmd.addr.bankgroup % static_cast<uint32_t>(banks_[rank_idx].size());
     uint32_t bank_idx = cmd.addr.bank % static_cast<uint32_t>(banks_[rank_idx][bg_idx].size());
     BankState& bank = banks_[rank_idx][bg_idx][bank_idx];
-    RankState& rank = ranks_[rank_idx];
 
     // A command can't be serviced before it existed, nor (below) before the
     // shared bus/tCCD spacing from whatever this channel serviced
@@ -224,45 +307,96 @@ DramCommand ChannelScheduler::drain_one() {
         earliest = std::max(earliest, last_write_complete_cycle_ + twtr);
     }
 
+    // Sync bank/rank state (row_open, precharge_ready_cycle, refresh cursor)
+    // through `earliest` -- this determines the Hit/Conflict/Empty branch
+    // below. Safe to use `earliest` (rather than the potentially-earlier
+    // visible_cycle) for this: earliest >= visible_cycle always (earliest is
+    // itself maxed with arrival_cycle == pending_[best].ready_cycle, and,
+    // once this channel has drained anything, with
+    // last_col_start_cycle_ + tCCD >= last_drain_col_start_ -- both of which
+    // visible_cycle is a max() over), so refresh boundaries due by
+    // visible_cycle are a subset of those due by earliest; syncing to the
+    // later point never misses one a row-miss branch below would need.
     earliest = apply_refresh_if_due(rank_idx, earliest);
 
     RowStatus status;
     uint64_t col_start;
     if (!bank.row_open) {
         status = RowStatus::Empty;
-        // The bank is already precharged (that's what row_open==false means)
-        // -- what remains to check is that whatever precharge-adjacent
-        // recovery was still outstanding from its last occupant (tRTP/tWR/
-        // tRAS, folded into precharge_ready_cycle below) has actually
-        // elapsed. There is no column-side constraint to check here: this
-        // bank has no open row for a stray column command to race against.
-        uint64_t act_start = std::max(earliest, bank.precharge_ready_cycle);
-        act_start = apply_activate_gating(rank, cmd.addr.bankgroup, act_start);
-        col_start = act_start + cyc(cfg_.tRCD);
+        // FIX (this rewrite, item 1): PRE/ACT are NOT gated by `earliest`
+        // (data bus / tCCD / turnaround / tWTR -- none of those are
+        // real constraints on the command bus, only on the data bus and
+        // column pipeline). The bank is already precharged (row_open ==
+        // false), so there's no PRE to place; ACT's only floors are this
+        // command's own visibility (visible_cycle -- see PendingCmd) and
+        // whatever precharge-adjacent recovery (tRTP/tWR/tRAS, folded into
+        // precharge_ready_cycle) was still outstanding from the bank's last
+        // occupant. place_activate() adds refresh due-ness, tRRD/tFAW
+        // gating (monotone-ACT-order guarantee lives here -- see its own
+        // comment), and a command-bus slot.
+        uint64_t act_start = place_activate(rank_idx, cmd.addr.bankgroup,
+                                             std::max(visible_cycle, bank.precharge_ready_cycle));
+        // The row is ready for its column command at act_start+tRCD, EXCEPT
+        // a refresh that comes due in [act_start, act_start+tRCD) forces
+        // every bank in the rank precharged again, so the row we just
+        // opened doesn't survive to be read. Approximation: rather than a
+        // fully-correct re-activate (another tRCD after the refresh), we
+        // conservatively push just the column command to that refresh's
+        // end -- this never lets a column command run during/before the
+        // refresh, but can slightly understate the true delay in the rare
+        // case a refresh boundary lands inside one tRCD (tREFI is normally
+        // >> tRCD, so this is a narrow edge case).
+        uint64_t row_ready = act_start + cyc(cfg_.tRCD);
+        uint64_t row_ready_checked = apply_refresh_if_due(rank_idx, row_ready);
+        // Column command floors on whichever is later: the data-bus/tCCD
+        // world (`earliest`, unchanged by lookahead) or the row actually
+        // being ready. Measures whether this row miss's row ops were fully
+        // hidden behind other work or exposed extra dead time -- see
+        // ChannelStats::row_miss_hidden/exposed*.
+        if (row_ready_checked <= earliest) {
+            stats_.row_miss_hidden++;
+        } else {
+            stats_.row_miss_exposed++;
+            stats_.row_miss_exposed_cycles += (row_ready_checked - earliest);
+        }
+        col_start = std::max(earliest, row_ready_checked);
         bank.row_open = true;
         bank.open_row = cmd.addr.row;
         bank.row_opened_at_cycle = act_start;
+        col_start = reserve_cmd_slot(col_start);
     } else if (bank.open_row == cmd.addr.row) {
         status = RowStatus::Hit;
-        // Next column command to an already-open row is governed purely by
-        // tCCD spacing (already folded into `earliest` above via
+        // Unchanged by this rewrite apart from the command-bus slot: next
+        // column command to an already-open row is governed purely by tCCD
+        // spacing (already folded into `earliest` above via
         // last_col_start_cycle_) plus this bank's own pipeline being free
         // for another column op -- NOT by tRTP/tWR, which are
         // precharge-only constraints and must not leak in here (see FIX 1).
         col_start = std::max(earliest, bank.col_ready_cycle);
+        col_start = reserve_cmd_slot(col_start);
     } else {
         status = RowStatus::Conflict;
+        // Same FIX as the Empty branch above, plus an actual PRE first:
         // precharge_ready_cycle already folds in both the tRTP/tWR recovery
         // from the last column command against this row and tRAS-since-
         // activate (see the bottom of this function) -- tRAS need not be
-        // re-derived here.
-        uint64_t precharge_ready = std::max(earliest, bank.precharge_ready_cycle);
-        uint64_t act_start = precharge_ready + cyc(cfg_.tRP);
-        act_start = apply_activate_gating(rank, cmd.addr.bankgroup, act_start);
-        col_start = act_start + cyc(cfg_.tRCD);
+        // re-derived here. PRE's own floor is visible_cycle/bank readiness,
+        // NOT `earliest` -- same reasoning as the Empty branch.
+        uint64_t precharge_ready = place_precharge(rank_idx, std::max(visible_cycle, bank.precharge_ready_cycle));
+        uint64_t act_start = place_activate(rank_idx, cmd.addr.bankgroup, precharge_ready + cyc(cfg_.tRP));
+        uint64_t row_ready = act_start + cyc(cfg_.tRCD);
+        uint64_t row_ready_checked = apply_refresh_if_due(rank_idx, row_ready);
+        if (row_ready_checked <= earliest) {
+            stats_.row_miss_hidden++;
+        } else {
+            stats_.row_miss_exposed++;
+            stats_.row_miss_exposed_cycles += (row_ready_checked - earliest);
+        }
+        col_start = std::max(earliest, row_ready_checked);
         bank.row_open = true;
         bank.open_row = cmd.addr.row;
         bank.row_opened_at_cycle = act_start;
+        col_start = reserve_cmd_slot(col_start);
     }
 
     uint32_t bus_bytes = static_cast<uint32_t>(std::max(1, cfg_.data_bus_bytes));
@@ -296,6 +430,7 @@ DramCommand ChannelScheduler::drain_one() {
     stats_.busy_cycles += transfer_cycles;
 
     last_col_start_cycle_ = col_start;
+    last_drain_col_start_ = col_start; // see its own comment -- the visibility floor
     last_col_bankgroup_ = cmd.addr.bankgroup;
     had_col_cmd_ = true;
 
@@ -315,6 +450,9 @@ DramCommand ChannelScheduler::drain_one() {
     cmd.start_cycle = col_start;
     cmd.complete_cycle = complete;
     cmd.row_status = status;
+
+    prune_cmd_bus_slots();
+
     return cmd;
 }
 

@@ -61,10 +61,12 @@ DDRTEST(heavy_channel_traffic_does_not_perturb_an_independent_channel) {
     // channel1 gets exactly the same 3-transaction pattern already hand-
     // verified in test_engine_basic.cpp's
     // page_hit_then_conflict_matches_hand_computed_cycles (Empty->13,
-    // Hit->21, Conflict->39, issue cycles 0,1,2). channel0, on a DIFFERENT
-    // core, gets 50 alternating-row conflict transactions -- heavy load
-    // that must have zero effect on channel1's numbers if channel routing
-    // and per-channel independence are correct.
+    // Hit->21, Conflict->33 -- see that test's full trace for the Conflict
+    // number, unaffected by anything here since channels are independent
+    // ChannelScheduler instances), issue cycles 0,1,2. channel0, on a
+    // DIFFERENT core, gets 50 alternating-row conflict transactions --
+    // heavy load that must have zero effect on channel1's numbers if
+    // channel routing and per-channel independence are correct.
     DdrcConfig cfg = two_channel_config();
     Engine engine(cfg);
 
@@ -99,7 +101,10 @@ DDRTEST(heavy_channel_traffic_does_not_perturb_an_independent_channel) {
     DDR_CHECK(ch1_results[1].dominant_row_status == RowStatus::Hit);
 
     DDR_CHECK_EQ(ch1_results[2].issue_cycle, 2ull);
-    DDR_CHECK_EQ(ch1_results[2].complete_cycle, 39ull);
+    // See page_hit_then_conflict_matches_hand_computed_cycles in
+    // test_engine_basic.cpp for the full cycle-by-cycle trace (identical
+    // config, identical scenario, an independent ChannelScheduler instance).
+    DDR_CHECK_EQ(ch1_results[2].complete_cycle, 33ull);
     DDR_CHECK(ch1_results[2].dominant_row_status == RowStatus::Conflict);
 }
 
