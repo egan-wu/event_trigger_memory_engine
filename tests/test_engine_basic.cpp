@@ -532,3 +532,106 @@ DDRTEST(core_burst_stats_computes_per_core_quantiles_and_stays_separate) {
     DDR_CHECK_EQ(c1.p75_bytes, 1024ull);
     DDR_CHECK_EQ(c1.max_bytes, 1024ull);
 }
+
+// [F] front-end: F1 -- same-AXI-ID in-order completion. AXI requires
+// same-ID responses to return in the order they were issued.
+// IdCursor::InProgress::max_complete is a raw per-channel timing number
+// that -- without the IdCursor::last_complete_cycle clamp in
+// finalize_in_progress_txn() -- can regress across a same-id sequence
+// whenever the id's Nth txn happens to land on a less-loaded channel than
+// its (N-1)th predecessor (which must fully finalize, on whatever channel
+// it targets, before the Nth txn is even admitted anywhere). Both tests
+// below share one setup: a same-core "warmup" on a distinct id opens row 1
+// on channel 0's only bank, then a barrier hands off to the id(s) under
+// test so channel/segment state is fully deterministic.
+//
+// Warmup (id=0, addr 0x800 -> row (0x800>>11)=1, fresh bank -> Empty):
+//   act=0 (nothing pending yet); row_ready=0+tRCD(5)=5; earliest=0 (first
+//   command ever) -> col_start=5; complete=5+8(64B/8B bus)=13.
+//   precharge_ready=max(5+tRTP(1)=6, 0+tRAS(10)=10)=10.
+// Barrier gate for segment 1 = warmup's completion = 13.
+//
+// A (id=1, addr 0x000 -> row 0, channel 0 -- same bank as the warmup,
+// still holding row 1 open -> Conflict): issue_cycle=max(port_free=1,
+// id_gate=0, seg.gate=13)=13. precharge_ready=place_precharge(max(13,
+// bank.precharge_ready=10)=13) -> no command-bus collision -> 13.
+// act_start=place_activate(13+tRP(5)=18): tRRD_L floor from warmup's
+// act(0)+1=1 is beaten by 18; tFAW(4) already elapsed -> 18 stands, no bus
+// collision -> 18. row_ready=18+tRCD(5)=23. earliest=max(issue=13, tCCD_L
+// from warmup's col_start(5)+1=6, bus_free(13)-cas(0)=13)=13; 23>13 so the
+// row-miss is exposed. col_start=23 (no command-bus collision).
+// complete=23+8=31.
+//
+// B (id=1 or id=2 depending on the test, addr ch1_base+0x000 -> channel 1,
+// a completely independent, never-touched ChannelScheduler -> Empty):
+// issue_cycle=14 (core port advances to 13+1=14 once A is admitted; no id
+// or barrier gate applies). visible_cycle=max(14, channel 1's own
+// last_drain_col_start=0)=14. act_start=14 (channel 1 has no prior
+// activates). row_ready=14+tRCD(5)=19. earliest=14 (channel 1 has never
+// carried a column command or bus use). col_start=max(14,19)=19.
+// complete=19+8=27 -- B's own RAW completion, strictly LESS than A's 31.
+namespace {
+DdrcConfig make_f1_two_channel_config() {
+    DdrcConfig cfg = make_test_config();
+    cfg.channels = 2;
+    cfg.map_channel = AddressField::contiguous(24, 1); // bit24 selects channel
+    return cfg;
+}
+} // namespace
+
+DDRTEST(same_axi_id_completion_is_clamped_to_predecessor) {
+    DdrcConfig cfg = make_f1_two_channel_config();
+    Engine engine(cfg);
+
+    const uint64_t ch0 = 0;
+    const uint64_t ch1 = 1ull << 24;
+
+    engine.push_txn(make_read(ch0 + 0x800, /*axi_id=*/0)); // warmup: opens row 1
+    engine.push_barrier(0);
+    engine.push_txn(make_read(ch0 + 0x000, /*axi_id=*/1)); // A: row 0 -> conflict
+    engine.push_txn(make_read(ch1 + 0x000, /*axi_id=*/1)); // B: SAME id -> must clamp
+
+    engine.run();
+    const auto& r = engine.results();
+    DDR_CHECK_EQ(r.size(), static_cast<size_t>(3));
+
+    DDR_CHECK_EQ(r[0].complete_cycle, 13ull); // warmup
+
+    DDR_CHECK_EQ(r[1].issue_cycle, 13ull);
+    DDR_CHECK(r[1].dominant_row_status == RowStatus::Conflict);
+    DDR_CHECK_EQ(r[1].complete_cycle, 31ull); // A
+
+    DDR_CHECK_EQ(r[2].issue_cycle, 14ull);
+    DDR_CHECK(r[2].dominant_row_status == RowStatus::Empty);
+    // Without the F1 clamp this would be 27 (B's own faster completion) --
+    // same-ID in-order completion means B cannot be reported done before
+    // its predecessor A, which finished at cycle 31.
+    DDR_CHECK_EQ(r[2].complete_cycle, 31ull);
+    DDR_CHECK(r[2].complete_cycle >= r[1].complete_cycle);
+    // latency_ns must reflect the clamped completion (31-14=17ns), not the
+    // raw one (27-14=13ns).
+    DDR_CHECK(r[2].latency_ns > 16.999 && r[2].latency_ns < 17.001);
+}
+
+DDRTEST(different_axi_id_completion_is_not_clamped) {
+    // Identical scenario, except B now uses a DIFFERENT id (2) from A's id
+    // (1): AXI only orders responses WITHIN one id, so B must keep its own
+    // raw, faster completion (27), strictly before A's 31.
+    DdrcConfig cfg = make_f1_two_channel_config();
+    Engine engine(cfg);
+
+    const uint64_t ch0 = 0;
+    const uint64_t ch1 = 1ull << 24;
+
+    engine.push_txn(make_read(ch0 + 0x800, /*axi_id=*/0)); // warmup
+    engine.push_barrier(0);
+    engine.push_txn(make_read(ch0 + 0x000, /*axi_id=*/1)); // A
+    engine.push_txn(make_read(ch1 + 0x000, /*axi_id=*/2)); // B: DIFFERENT id
+
+    engine.run();
+    const auto& r = engine.results();
+    DDR_CHECK_EQ(r.size(), static_cast<size_t>(3));
+    DDR_CHECK_EQ(r[1].complete_cycle, 31ull); // A unchanged
+    DDR_CHECK_EQ(r[2].complete_cycle, 27ull); // B: independent id, unclamped
+    DDR_CHECK(r[2].complete_cycle < r[1].complete_cycle);
+}

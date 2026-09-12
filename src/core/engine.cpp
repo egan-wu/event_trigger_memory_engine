@@ -186,6 +186,16 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
     IdCursor& idc = seg.by_id[axi_id];
     IdCursor::InProgress& ip = idc.in_progress;
 
+    // [F] front-end (F1): clamp this txn's completion to at least its
+    // predecessor's own (already-clamped) completion on this same id --
+    // see IdCursor::last_complete_cycle's comment for why ip.max_complete
+    // alone can regress id-to-id, and why a fresh per-segment 0 is always
+    // safe. `complete` (not ip.max_complete) is now the one true completion
+    // cycle for this txn -- every place that used to read ip.max_complete
+    // directly reads this instead.
+    uint64_t complete = std::max(ip.max_complete, idc.last_complete_cycle);
+    idc.last_complete_cycle = complete;
+
     TxnResult res;
     res.txn_id = ip.txn_id;
     res.core_id = ip.core_id;
@@ -193,8 +203,8 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
     res.addr = ip.addr;
     res.issue_cycle = ip.issue_cycle;
     res.bytes = static_cast<uint32_t>(ip.bytes);
-    res.complete_cycle = ip.max_complete;
-    res.latency_ns = static_cast<double>(ip.max_complete - ip.issue_cycle) * cfg_.clock_period_ns();
+    res.complete_cycle = complete;
+    res.latency_ns = static_cast<double>(complete - ip.issue_cycle) * cfg_.clock_period_ns();
     res.dram_bytes = ip.num_chunks * static_cast<uint32_t>(ip.chunk_bytes);
     res.dominant_row_status = ip.dominant_row_status;
     res.hits = ip.hits;
@@ -208,7 +218,7 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
     cum_latency_sum_ns_ += res.latency_ns;
     cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
 
-    idc.outstanding.insert(ip.max_complete);
+    idc.outstanding.insert(complete);
 
     if (ip.has_window) {
         WindowStats& w = windows_[ip.window_index];
@@ -223,7 +233,7 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
     }
 
     idc.pending.pop_front();
-    seg.max_complete = std::max(seg.max_complete, ip.max_complete);
+    seg.max_complete = std::max(seg.max_complete, complete);
 
     if (!idc.pending.empty()) {
         uint64_t next_port_free = core_port_free_cycle_[core_id];

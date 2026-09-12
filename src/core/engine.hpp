@@ -160,6 +160,27 @@ struct IdCursor {
     std::multiset<uint64_t> outstanding; // completion cycles of this id's in-flight txns
     bool queued = false;
 
+    // [F] front-end: AXI requires same-ID responses to return in the order
+    // they were issued. The channel-level completion this id's Nth txn
+    // actually computes (IdCursor::InProgress::max_complete) is a raw
+    // per-channel timing result and can, in a multi-channel config, come out
+    // SMALLER than the (N-1)th txn's own completion -- e.g. txn N-1 lands on
+    // a heavily-loaded channel and txn N (same id, admitted only after N-1
+    // fully finalizes) lands on an idle one. A real controller holds N's
+    // response back until N-1's has gone out, so the reported completion
+    // can never regress id-to-id. last_complete_cycle is the previous txn's
+    // (already-clamped) completion on this id; finalize_in_progress_txn()
+    // clamps every new completion to at least this value -- see its use
+    // there for the exact five places that must read the clamped number
+    // instead of InProgress::max_complete directly. Scoped identically to
+    // `outstanding` above (per-segment, like the rest of IdCursor): a new
+    // segment only ever becomes reachable once its predecessor's barrier
+    // gate (Segment::gate_cycle, itself the prior segment's max_complete
+    // across every id) has already forced every one of its own txns to
+    // issue no earlier than that -- so a fresh IdCursor starting this at 0
+    // for a new segment can never under-clamp.
+    uint64_t last_complete_cycle = 0;
+
     // Bookkeeping for whichever txn is currently being chunked/dispatched
     // for this id (only one at a time, matching `queued`'s one-event-per-id
     // invariant). A txn's chunks are now admitted into their channels one

@@ -380,8 +380,8 @@ IDs can complete out of order relative to each other.
 | `bytes` | logical: total burst size requested (`size_bytes × len_beats`) |
 | `dram_bytes` | physical: full burst-aligned bytes DRAM actually moved, ≥ `bytes` |
 | `issue_cycle` | cycle the engine determined this could dispatch (outstanding cap, core port, barrier gate) |
-| `complete_cycle` | cycle the last chunk of this burst finished transferring |
-| `latency_ns` | `(complete_cycle − issue_cycle)` in ns |
+| `complete_cycle` | cycle the last chunk of this burst finished transferring; for two transactions sharing a `(core_id, axi_id)`, never earlier than the predecessor's own `complete_cycle` — same-ID AXI responses return in issue order, so a later transaction that would otherwise finish first (e.g. a different, less-loaded channel) is held to its predecessor's completion |
+| `latency_ns` | `(complete_cycle − issue_cycle)` in ns — reflects the same-ID clamp above |
 | `dominant_row_status` | `hit`/`conflict`/`empty` of the burst's *first* DRAM command chunk only |
 | `hits`, `conflicts`, `empties` | the same classification counted across *every* chunk of this burst |
 
