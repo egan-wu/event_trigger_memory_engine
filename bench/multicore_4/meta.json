@@ -8,21 +8,12 @@
   ],
   "generator": "bench/generate_workloads.py:gen_multicore_4",
   "deterministic": true,
+  "numbers_in_prose": "Numbers quoted in description/sanity_checks are from the run at authoring time and are NOT kept in sync with the model; they explain the reasoning, not the current values. golden.json holds the current numbers. The reasoning is what should be re-checked when a value moves -- if it no longer holds, that is a finding.",
   "rng": "none -- pure arithmetic sequence, no randomness",
   "transaction_count": 8000,
   "transaction_count_per_core": 2000,
   "history_window_ns": 500.0,
-  "observed_windows": 98,
-  "observed_headline_metrics": {
-    "sim_time_ns": 48977.5,
-    "avg_dram_bandwidth_gbps": 10.4538,
-    "avg_latency_ns": 195.388,
-    "bandwidth_utilization_pct": 40.8351,
-    "page_hit_rate_pct": 96.85,
-    "row_conflict_rate_pct": 3.1,
-    "row_empty_rate_pct": 0.05,
-    "bankgroup_reuse_rate_pct": 99.9875
-  },
+  "observed_metrics": "see golden.json in this directory -- it is the authoritative snapshot, regenerated with --update-golden whenever model behavior deliberately changes. Numbers were duplicated here once and silently went stale the first time the timing model was fixed.",
   "sanity_checks": [
     "hits+conflicts+empties = 96.85+3.1+0.05 = 100.0 -- OK",
     "bandwidth_utilization_pct (40.8%) higher than seq_read's single-stream 29.8%, as expected from 4-way bank parallelism -- but nowhere near 4x, which is the shared-channel column-command spacing (tCCD_L, since bankgroup still barely rotates) this workload is built to expose",

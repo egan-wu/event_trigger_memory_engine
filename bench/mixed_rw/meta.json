@@ -9,21 +9,11 @@
   ],
   "generator": "bench/generate_workloads.py:gen_mixed_rw",
   "deterministic": true,
+  "numbers_in_prose": "Numbers quoted in description/sanity_checks are from the run at authoring time and are NOT kept in sync with the model; they explain the reasoning, not the current values. golden.json holds the current numbers. The reasoning is what should be re-checked when a value moves -- if it no longer holds, that is a finding.",
   "rng": "none -- strict alternation, no randomness",
   "transaction_count": 8000,
   "history_window_ns": 1000.0,
-  "observed_windows": 100,
-  "observed_headline_metrics": {
-    "sim_time_ns": 99756.6,
-    "avg_dram_bandwidth_gbps": 5.13249,
-    "avg_latency_ns": 199.346,
-    "bandwidth_utilization_pct": 20.0488,
-    "page_hit_rate_pct": 96.875,
-    "row_conflict_rate_pct": 3.1125,
-    "row_empty_rate_pct": 0.0125,
-    "turnaround_overhead_pct": 0.0,
-    "bankgroup_reuse_rate_pct": 99.9875
-  },
+  "observed_metrics": "see golden.json in this directory -- it is the authoritative snapshot, regenerated with --update-golden whenever model behavior deliberately changes. Numbers were duplicated here once and silently went stale the first time the timing model was fixed.",
   "sanity_checks": [
     "hits+conflicts+empties = 96.875+3.1125+0.0125 = 100.0 -- OK",
     "hit/conflict/empty rates identical to seq_read, as designed (same address cadence) -- OK",

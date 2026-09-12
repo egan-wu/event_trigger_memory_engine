@@ -9,21 +9,12 @@
   "structure": "40 phases x 150 AR (read) transactions, one AXI id (0), 64 bytes each, stride = 2048B (one row) within each phase; base address offset by phase*stride*per_phase so phases don't overlap each other's rows; one BARRIER between phases.",
   "generator": "bench/generate_workloads.py:gen_bursty",
   "deterministic": true,
+  "numbers_in_prose": "Numbers quoted in description/sanity_checks are from the run at authoring time and are NOT kept in sync with the model; they explain the reasoning, not the current values. golden.json holds the current numbers. The reasoning is what should be re-checked when a value moves -- if it no longer holds, that is a finding.",
   "rng": "none -- pure arithmetic sequence, no randomness",
   "transaction_count": 6000,
   "config_deviation": "max_outstanding_per_id = 200 (vs 8 everywhere else) -- see why_this_is_hard_to_construct above; this is the one bench config that intentionally differs on a ddrc_resources field, not just history_window_ns.",
   "history_window_ns": 3000.0,
-  "observed_windows": 94,
-  "observed_headline_metrics": {
-    "sim_time_ns": 286830,
-    "avg_dram_bandwidth_gbps": 1.33877,
-    "avg_latency_ns": 3595.28,
-    "bandwidth_utilization_pct": 5.22957,
-    "page_hit_rate_pct": 0.0,
-    "row_conflict_rate_pct": 99.9833,
-    "row_empty_rate_pct": 0.0166667,
-    "bankgroup_reuse_rate_pct": 99.9833
-  },
+  "observed_metrics": "see golden.json in this directory -- it is the authoritative snapshot, regenerated with --update-golden whenever model behavior deliberately changes. Numbers were duplicated here once and silently went stale the first time the timing model was fixed.",
   "observed_window_shape": {
     "zero_activity_windows": 52,
     "of_total_windows": 94,

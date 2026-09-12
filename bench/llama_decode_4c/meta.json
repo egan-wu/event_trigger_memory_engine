@@ -9,6 +9,7 @@
   ],
   "generator": "bench/generate_workloads.py:gen_llama_decode_4c",
   "deterministic": true,
+  "numbers_in_prose": "Numbers quoted in description/sanity_checks are from the run at authoring time and are NOT kept in sync with the model; they explain the reasoning, not the current values. golden.json holds the current numbers. The reasoning is what should be re-checked when a value moves -- if it no longer holds, that is a finding.",
   "rng": "none -- pure arithmetic sequence, no randomness",
   "transaction_count": 4096,
   "transaction_count_per_core": 1024,

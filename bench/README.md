@@ -170,28 +170,21 @@ behavior known to be wrong.** This harness's job is to make *change* visible
 and attributable, not to certify the numbers as physically correct DDR
 behavior. As of this snapshot:
 
-1. **Row operations can't overlap other banks' data transfers.** On a row
-   miss, `drain_one()` starts the PRE/ACT sequence no earlier than
-   `earliest` -- which already includes the data-bus floor and the tCCD
-   floor -- so every conflict exposes the full `tRP + tRCD` (every empty,
-   `tRCD`) as dead time on the data bus. A real controller issues PRE/ACT to
-   one bank on the command bus while other banks' data is still streaming.
-   Measured on the full-scale Llama trace: 22.5% of the data bus's time is
-   this exposed conflict latency; an idealized overlap takes the same
-   traffic from 70% to 93% utilization. Every workload with row misses is
-   pessimistic until this is fixed -- `llama_decode_4c` (~50% conflicts)
-   most of all, `seq_read`/`multicore_4` least.
-2. **FR-FCFS degenerates to FCFS under saturation.** `kStarvationLimit`
+1. **FR-FCFS degenerates to FCFS under saturation.** `kStarvationLimit`
    (16) is below `command_queue_depth` (32), so once the queue is full every
    pending command exceeds the limit and the starvation override picks the
-   oldest one on essentially every decision.
+   oldest one on essentially every decision. On the full-scale Llama trace
+   that fired on 8,388,592 of 8,388,608 selections.
+2. **No arrival timestamps.** Issue times are derived from maximum eagerness
+   bounded by the outstanding cap, so a workload with genuine idle gaps
+   can't be represented -- `bursty` ends up with the same DRAM timeline as
+   `strided`, differing only in queueing latency.
 
-Fixed since the first snapshot (each is now covered by a hand-computed test
-in `tests/test_command_queue.cpp`): missing CAS latency (tCL/tCWL), missing
-tWTR, tRTP/tWR wrongly gating same-row column commands, and refresh not
-closing open rows. The prediction table below was written for those four
-fixes and is kept as a record; see the note under it for how the actual
-results compared.
+Fixed since the first snapshot, each covered by hand-computed tests in
+`tests/test_command_queue.cpp`: missing CAS latency (tCL/tCWL), missing
+tWTR, tRTP/tWR wrongly gating same-row column commands, refresh not closing
+open rows, and row operations being unable to overlap other banks' data
+transfers.
 
 ## Prediction table
 
@@ -256,3 +249,32 @@ Measured when the four fixes landed (bandwidth / latency, old golden → new):
 | `strided`, `bursty` | flat | flat | right |
 
 All workloads gained `row_empty_rate_pct` and lost `row_conflict_rate_pct` — Fix 4's signature (refresh now closes rows, so the next access re-opens instead of conflicting).
+
+
+### Round 2: overlapping row operations with data transfers
+
+Previously a row miss started its PRE/ACT only once the data bus was nearly
+free, so every conflict exposed `tRP + tRCD` and every empty `tRCD` as dead
+bus time. Real controllers issue those on the command bus while other banks
+stream data. Measured effect:
+
+| case | bandwidth | why |
+|---|---|---|
+| `llama_decode_4c` | 7.35 → 35.19 GB/s (14.4% → **68.7%** util) | ~50% conflicts, 32 banks to hide them behind |
+| `multicore_4` | 10.41 → 12.24 GB/s (+17.6%) | 4 streams in 4 distinct banks: exactly what bank-level parallelism targets |
+| `rand_read` | 2.00 → 2.15 GB/s (+7.3%) | far below its tFAW ceiling of 12.19 GB/s; a single stream with `max_outstanding_per_id = 8` rarely keeps enough different-bank commands visible at once for lookahead to exploit |
+| `mixed_rw` | 4.02 → 4.07 GB/s (+1.3%) | single bank, so nothing to overlap with; the small gain is turnaround no longer gating PRE/ACT, which is correct |
+| `seq_read` | unchanged | its bank/bankgroup bits never toggle over the run, so it is effectively single-bank despite having conflicts |
+| `strided`, `bursty` | unchanged | single bank |
+
+Independently verified at integration: across 33.6M command-bus slot
+reservations on the full-scale trace, zero collided with a slot that
+pruning had dropped, and the live slot set peaked at 16,381 entries on both
+the 262K-command bench corpus and the 16.8M-command full-scale run -- i.e.
+bounded, not growing with trace length. Full-scale runtime 3.8s → 9.8s.
+
+The 68.7% for `llama_decode_4c` sits just under the ~70% an idealized
+experiment produced (PRE/ACT allowed to start as early as a transaction was
+issued, with no command bus and no queue-visibility limit). Landing slightly
+below that bound is the expected result: this model has strictly more
+constraints than the idealization.

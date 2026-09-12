@@ -7,6 +7,7 @@
   ],
   "generator": "bench/generate_workloads.py:gen_rand_read",
   "deterministic": true,
+  "numbers_in_prose": "Numbers quoted in description/sanity_checks are from the run at authoring time and are NOT kept in sync with the model; they explain the reasoning, not the current values. golden.json holds the current numbers. The reasoning is what should be re-checked when a value moves -- if it no longer holds, that is a finding.",
   "rng": {
     "algorithm": "64-bit LCG, Knuth/MMIX constants: state' = (6364136223846793005*state + 1442695040888963407) mod 2**64",
     "seed": "0x5EED1234 (24274996276 decimal)",
@@ -15,17 +16,7 @@
   },
   "transaction_count": 8000,
   "history_window_ns": 2600.0,
-  "observed_windows": 102,
-  "observed_headline_metrics": {
-    "sim_time_ns": 262948,
-    "avg_dram_bandwidth_gbps": 1.94715,
-    "avg_latency_ns": 262.84,
-    "bandwidth_utilization_pct": 7.60607,
-    "page_hit_rate_pct": 0.0,
-    "row_conflict_rate_pct": 99.8,
-    "row_empty_rate_pct": 0.2,
-    "bankgroup_reuse_rate_pct": 25.7625
-  },
+  "observed_metrics": "see golden.json in this directory -- it is the authoritative snapshot, regenerated with --update-golden whenever model behavior deliberately changes. Numbers were duplicated here once and silently went stale the first time the timing model was fixed.",
   "sanity_checks": [
     "hits+conflicts+empties = 0+99.8+0.2 = 100.0 -- OK",
     "row_empty_rate_pct (0.2%) is close to 16/8000 = 0.2% -- exactly matches 'one empty per bank on first touch', confirming addresses really do spread across all 16 banks as intended",
