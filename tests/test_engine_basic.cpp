@@ -69,7 +69,46 @@ DDRTEST(page_hit_then_conflict_matches_hand_computed_cycles) {
 
     DDR_CHECK(r[2].dominant_row_status == RowStatus::Conflict);
     DDR_CHECK_EQ(r[2].issue_cycle, 2ull);
-    DDR_CHECK_EQ(r[2].complete_cycle, 39ull);
+    // All 3 commands are admitted into the channel queue before any of them
+    // drain (command_queue_depth=8, only 3 chunks total, so try_admit never
+    // needs to force a drain first, and none of the 3 has a row-open bank to
+    // race a peek_priority against until the first one actually drains) --
+    // FR-FCFS ties all three at "idle" on the very first pick and resolves
+    // by arrival order, so they still drain in txn order (0,1,2); after
+    // txn0 drains, txn1's Hit(0) and txn2's still-Idle(1) mean txn1 goes
+    // next, then txn2 last. Only bank(0,0) exists (bankgroups=1,
+    // banks_per_group=1), so "same_bg" is trivially true throughout.
+    //   txn0 (Empty, drained 1st): act=0 (fresh, nothing pending).
+    //     row_ready=0+tRCD(5)=5; earliest=0 (first command ever) ->
+    //     col_start=5. complete=5+8(64B/8B bus)=13.
+    //     precharge_ready=max(5+tRTP(1)=6, 0+tRAS(10)=10)=10.
+    //     cmd_bus_slots_={0(ACT),5}.
+    //   txn1 (Hit, drained 2nd): earliest=max(tCCD_L: 5+1=6,
+    //     bus_free(13)-cas(0)=13)=13. col_start=max(13,col_ready=13)=13; no
+    //     command-bus collision (nearest slot ends at 7). complete=13+8=21.
+    //     precharge_ready=max(13+1=14,0+10=10)=14. Its own column-command
+    //     slot (13) is inserted, then pruning drops the now-unreachable ACT
+    //     slot at 0 (its interval [0,2) ends at or before the new pruning
+    //     horizon, min(2, txn2's own ready_cycle=2) = 2) -- cmd_bus_slots_
+    //     becomes {5,13}.
+    //   txn2 (Conflict, drained 3rd, visible_cycle=max(ready=2,
+    //     last_drain_col_start_=0)=2, fixed at admission time before either
+    //     of the above drained): earliest = max(tCCD_L: 13+1=14,
+    //     bus_free(21)-cas(0)=21) = 21.
+    //     precharge_ready = place_precharge(max(visible=2,
+    //     bank.precharge_ready=14)=14): no refresh due; command-bus slot at
+    //     14 collides with txn1's own column slot [13,15) -> pushed to 15.
+    //     act_start = place_activate(bg0, 15+tRP(5)=20): tRRD_L from
+    //     txn0's act(0)+1=1, beaten by 20; tFAW(4) already elapsed
+    //     (0+4<=20, so the single prior activate ages out of the rolling
+    //     window) -> no further push; command-bus slot at 20 has no
+    //     collision (nearest slot ends at 15) -> act_start=20.
+    //     row_ready = 20+tRCD(5) = 25; no refresh due -> row_ready_checked=25.
+    //     25 > earliest(21) -> exposed by 4 (the row ops needed 4 more
+    //     cycles than txn1's own data-bus floor already provided).
+    //     col_start = max(21,25) = 25; its own command-bus slot at 25 has
+    //     no collision. complete = 25+8 = 33.
+    DDR_CHECK_EQ(r[2].complete_cycle, 33ull);
 }
 
 DDRTEST(outstanding_cap_gates_new_issues_within_one_id) {
