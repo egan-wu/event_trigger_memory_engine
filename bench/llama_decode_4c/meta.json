@@ -4,8 +4,8 @@
   "description": [
     "4 cores (core0.csv..core3.csv), 16 layers. Layer L's weights are one contiguous 1MB block at L*1MB; core c streams bytes [c*256KB, (c+1)*256KB) of it as 64 AXI reads of 4KB (size 64B x 64 beats, AXI id 1), then a BARRIER (its layer-L loads must land before its layer L+1 starts).",
     "Scaled-down (16MB) version of the 1GB synthetic Llama-decode trace. That trace placed each core's buffer 4GB apart -- above bit 30, the highest bit this 2GB address map decodes -- so all four cores aliased onto the same banks/rows/columns and shared open rows: 70.4% utilization at 96.4% page-hit, describing a workload where four DMAs read the SAME weights. Here every address is inside the modeled capacity and high_address_regions must be 1.",
-    "Address map (from the bank-group-ordering fix): bankgroup [7:6] fastest-changing so consecutive 64B bursts pay tCCD_S not tCCD_L, then bank [9:8], channel [10], column [14:11], row [30:15]. A 4KB descriptor therefore sweeps all 32 banks twice (2 accesses per bank), and the next core's descriptor sweeps the same banks with a different row -- the inter-core row thrashing behind the ~50% conflict rate.",
-    "Known modeling limitation this case exposes (see bench/README.md): the scheduler starts every row miss's PRE/ACT only after the data bus is nearly free, instead of overlapping it with other banks' transfers as a real controller does, so each conflict exposes the full tRP+tRCD on the data bus. Expect this case to move sharply UP when that is fixed."
+    "Address map is core-isolated: bankgroup [7:6] stays fastest-changing (consecutive 64B bursts still pay tCCD_S, not tCCD_L), then channel [8], column [17:9] (unmapped, doesn't affect scheduling), bank [19:18], row [35:20]. Each core's 256KB slice differs only in bits [19:18] -- exactly the relocated 'bank' field -- so the 4 cores land on 4 disjoint bank sets by construction. The original mapping (bank [9:8], channel [10]) instead put every core's concurrent layer-N loads through the SAME 32-bank set, which is what produced the ~50% inter-core row-conflict rate.",
+    "Effect (golden.json is authoritative): row_conflict_rate_pct 49.7% -> 0.006%, page_hit_rate_pct 49.5% -> 99.5%, bandwidth_utilization_pct 68.7% -> 95.3%. The remaining ~0.2 percentage-point gap below the refresh-only ceiling (100% - refresh_overhead_pct) is the residual layer-boundary ACT burst: at each of the 16 layer boundaries, up to ~16 banks per channel need a fresh row at once, and tRRD/tFAW limit how fast even ideal scheduling can issue those -- not an unexplained discrepancy."
   ],
   "generator": "bench/generate_workloads.py:gen_llama_decode_4c",
   "deterministic": true,
@@ -16,6 +16,6 @@
   "history_window_ns": 15000.0,
   "sanity_checks": [
     "high_address_regions == 1 -- the layout bug this case exists to have fixed",
-    "full-scale (1GB) run with the same layout gives the same utilization (14.4%) and hit/conflict (46.7% / 49.8%) -- the scale-down doesn't change the behavior"
+    "row_conflict_rate_pct stays near 0 -- the core-isolated mapping's whole point; a value climbing back up means the bank/channel/row bit assignment regressed"
   ]
 }

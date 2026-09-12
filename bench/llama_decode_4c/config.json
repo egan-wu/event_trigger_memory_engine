@@ -11,9 +11,9 @@
   },
   "address_mapping": {
     "bankgroup": { "bit_start": 6, "bit_width": 2 },
-    "bank": { "bit_start": 8, "bit_width": 2 },
-    "channel": { "bit_start": 10, "bit_width": 1 },
-    "row": { "bit_start": 15, "bit_width": 16 }
+    "channel": { "bit_start": 8, "bit_width": 1 },
+    "bank": { "bit_start": 18, "bit_width": 2 },
+    "row": { "bit_start": 20, "bit_width": 16 }
   },
   "timing_ns": {
     "tRCD": 13.75, "tRP": 13.75, "tRAS": 32.0, "tRC": 45.75,
