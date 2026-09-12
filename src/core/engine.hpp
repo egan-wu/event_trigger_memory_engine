@@ -55,6 +55,30 @@ struct SummaryStats {
     uint64_t high_address_regions = 0;
 };
 
+// Distribution of AXI burst sizes (logical bytes requested per transaction,
+// i.e. size_bytes * len_beats -- the same quantity as TxnResult::bytes) one
+// core has pushed, so a caller can see whether one core's requests are
+// systematically smaller/larger than another's -- a small average burst
+// size concentrates DDRC/timing overhead (tRCD/tRP/CAS) over less useful
+// data per command, which can bottleneck a core even when aggregate
+// bandwidth utilization looks fine. Percentiles use the nearest-rank method
+// (the value at the N-th smallest observation, N = ceil(pct/100 * count))
+// rather than interpolating between two observed sizes: burst sizes are
+// naturally few and discrete (they fall out of a handful of size_bytes/
+// len_beats combinations), so every reported value is one that was actually
+// observed, not a synthetic in-between number. See Engine::core_burst_stats_at().
+struct CoreBurstStats {
+    int core_id = 0;
+    uint64_t txn_count = 0;
+    uint64_t total_bytes = 0;
+    double mean_bytes = 0.0;
+    uint64_t min_bytes = 0;
+    uint64_t p25_bytes = 0;
+    uint64_t p50_bytes = 0; // median
+    uint64_t p75_bytes = 0;
+    uint64_t max_bytes = 0;
+};
+
 // One fixed-size bucket of simulated time (history_window_ns in the config),
 // indexed by a transaction's issue_cycle. Accumulated incrementally at
 // dispatch time -- like SummaryStats, unaffected by prune_results_before()
@@ -196,6 +220,18 @@ public:
     // NOT affected by prune_results_before() -- see WindowStats above.
     const std::vector<WindowStats>& windows() const { return windows_; }
 
+    // Per-core AXI burst-size distribution -- see CoreBurstStats. Cumulative
+    // since the engine was created and unaffected by prune_results_before(),
+    // like summary()/windows() (it's recorded at push_txn() time, an
+    // input-stream property, not a scheduling outcome). Cores are discovered
+    // dynamically from whatever core_id values are pushed -- there's no
+    // config-level core count -- so read this by index (ascending core_id
+    // order), not by core_id directly; re-check num_cores_with_burst_stats()
+    // before iterating if a transaction with a not-yet-seen core_id might
+    // have been pushed since your last call.
+    size_t num_cores_with_burst_stats() const { return core_burst_histogram_.size(); }
+    CoreBurstStats core_burst_stats_at(size_t index) const;
+
     // Removes every result with txn_id <= max_txn_id from results() (order-
     // independent -- results() is dispatch-ordered, not txn_id-ordered, since
     // independent AXI-ID streams can complete out of order relative to each
@@ -254,6 +290,14 @@ private:
     int mapped_address_bits_ = 0;
     std::set<uint64_t> high_address_regions_;
     void note_high_address_region(uint64_t addr);
+
+    // See CoreBurstStats / num_cores_with_burst_stats() / core_burst_stats_at().
+    // core_id -> (burst_size_bytes -> observation count). A histogram rather
+    // than a stored list of every burst size: real workloads use a handful
+    // of distinct AXI burst sizes, so this stays small regardless of how
+    // many transactions are pushed, while still giving exact (not sampled or
+    // approximated) quantiles.
+    std::map<int, std::map<uint64_t, uint64_t>> core_burst_histogram_;
 
     void enqueue_if_ready(int core_id, int segment_idx, uint32_t axi_id);
     void compute_summary();

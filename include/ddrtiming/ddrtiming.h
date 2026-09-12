@@ -102,6 +102,29 @@ typedef struct {
     double bank_utilization_pct; /* active_bank_count / total_banks * 100 */
 } ddrt_window_stats_t;
 
+/* Distribution of AXI burst sizes (logical bytes requested per transaction,
+ * size_bytes * len_beats) one core has pushed -- see
+ * ddrt_get_num_cores()/ddrt_get_core_burst_stats_at(). A small average burst
+ * size concentrates DDRC/timing overhead over less useful data per command,
+ * which can bottleneck one core even when aggregate bandwidth looks fine.
+ * Percentiles use the nearest-rank method (the value at the N-th smallest
+ * observation) rather than interpolating between two observed sizes: burst
+ * sizes are naturally few and discrete, so every value here was actually
+ * observed, not synthesized. Cumulative since the engine was created and
+ * unaffected by ddrt_prune_results_before() -- recorded at push time, an
+ * input-stream property, not a scheduling outcome. */
+typedef struct {
+    int core_id;
+    uint64_t txn_count;
+    uint64_t total_bytes;
+    double mean_bytes;
+    uint64_t min_bytes;
+    uint64_t p25_bytes;
+    uint64_t p50_bytes; /* median */
+    uint64_t p75_bytes;
+    uint64_t max_bytes;
+} ddrt_core_burst_stats_t;
+
 /* Per-channel breakdown for one window -- see ddrt_get_window_channel_stats().
  * Exists because the aggregate ddrt_window_stats_t above can't distinguish
  * "every channel at 50%" from "one channel at 100%, one idle": both sum to
@@ -163,6 +186,18 @@ uint64_t ddrt_get_num_channels(ddrt_engine_t* engine);
  * a channel that had no traffic in that window, same as the aggregate. */
 int ddrt_get_window_channel_stats(ddrt_engine_t* engine, uint64_t window_index,
                                    uint64_t channel_index, ddrt_channel_window_stats_t* out);
+
+/* Number of distinct core_id values seen among transactions pushed so far --
+ * for iterating ddrt_get_core_burst_stats_at(). Cores are discovered
+ * dynamically (there's no config-level core count), ordered ascending by
+ * core_id: re-read this before iterating rather than caching it, in case a
+ * transaction with a not-yet-seen core_id was pushed since your last call. */
+uint64_t ddrt_get_num_cores(ddrt_engine_t* engine);
+
+/* One core's AXI burst-size distribution by index (0..ddrt_get_num_cores()-1,
+ * ascending core_id order) -- see ddrt_core_burst_stats_t. Returns -1 (out
+ * left untouched) for an out-of-range index. */
+int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_burst_stats_t* out);
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path);
 

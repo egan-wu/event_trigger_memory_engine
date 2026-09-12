@@ -65,6 +65,7 @@ Smoke test:
 - Event-driven DDRC command scheduler (FR-FCFS) over a full DDR4/5-class timing set: tRCD/tRP/tRAS/tRC, tCL/tCWL (CAS latency), tCCD_S/L, tRRD_S/L, tFAW, tWTR_S/L, tRTP/tWR, R↔W bus turnaround, periodic refresh (tREFI/tRFC)
 - Configurable address mapping: contiguous bit-fields or scattered bit-gather per field, with optional XOR-hash interleaving
 - Per-bank row-buffer tracking → page-hit / row-conflict / row-empty classification per DRAM command
+- Per-core AXI burst-size distribution (mean + quartiles) — see whether one core's requests are systematically smaller than another's before blaming the DRAM scheduler for its throughput
 - Over-fetch accounting: logical bytes requested vs. physical burst-aligned bytes DRAM actually moved
 - Input-integrity check: flags address aliasing (trace regions that silently collapse onto the same physical DRAM locations — `high_address_regions`, §5.1)
 - Windowed time-series history: bandwidth, row-status, outstanding-request occupancy, bank utilization, bank-group reuse — with a per-channel breakdown
@@ -178,9 +179,10 @@ ddrt_destroy(e);
 | `ddrt_prune_results_before(e, max_txn_id)` | free retained results with `txn_id ≤ max_txn_id`; `ddrt_get_summary()` is unaffected (tracked cumulatively, independent of pruning) |
 | `ddrt_get_num_windows(e)` / `ddrt_get_window_at(e, i, &out)` | windowed history, §5.3 |
 | `ddrt_get_num_channels(e)` / `ddrt_get_window_channel_stats(e, wi, ci, &out)` | per-channel breakdown of one window |
+| `ddrt_get_num_cores(e)` / `ddrt_get_core_burst_stats_at(e, i, &out)` | per-core AXI burst-size distribution, §5.5 |
 | `ddrt_write_report_json(e, path)` | write the full report (summary + transactions + windows) to JSON |
 | `ddrt_last_error(e)` | error string for the last failed call; pass `NULL` to read a failed `ddrt_create()`'s error |
-| `ddrt_version(void)` | library version string (currently `"0.2.0"`) |
+| `ddrt_version(void)` | library version string (currently `"0.3.0"`) |
 
 For a long-running caller with no natural "end of log" (a daemon pushing
 transactions as they happen): push, call `ddrt_run()` periodically as a
@@ -324,6 +326,34 @@ Metrics available: `avg_bandwidth_gbps` (always), `outstanding_occupancy_pct`
 column — degrades gracefully on older CSVs), `conflict_pct` / `hit_pct`
 (derived from `hits`/`conflicts`/`empties`, always present).
 
+### 5.5 Per-core AXI burst-size distribution (`ddrt_core_burst_stats_t`, JSON `"core_burst_stats"[]`)
+
+One entry per distinct `core_id` seen among pushed transactions (ascending
+order), always populated once at least one transaction has been pushed — no
+config flag needed, unlike windowed history. Recorded at push time (an
+input-stream property, not a scheduling outcome), so it's cumulative since
+the engine was created and unaffected by `prune_results_before()`, same as
+the summary.
+
+| field | meaning |
+|---|---|
+| `core_id` | which core this entry describes |
+| `txn_count` | transactions pushed by this core so far |
+| `total_bytes` | sum of every burst's logical size (`size_bytes × len_beats`) from this core |
+| `mean_bytes` | `total_bytes / txn_count` |
+| `min_bytes`, `max_bytes` | smallest / largest burst size observed from this core |
+| `p25_bytes`, `p50_bytes` (median), `p75_bytes` | quartiles of this core's burst-size distribution |
+
+Percentiles use the **nearest-rank method** (the value at the `⌈pct/100 × count⌉`-th
+smallest observation) instead of interpolating between two observed sizes:
+burst sizes are naturally few and discrete (a handful of `size_bytes`/`len_beats`
+combinations in practice), so every quartile reported here is a size that was
+actually sent, never a synthetic in-between number. A core whose `mean_bytes`/
+`p50_bytes` is markedly smaller than its peers is paying DDRC/timing overhead
+(tRCD/tRP/CAS) over less useful data per command — worth checking before
+assuming a low-throughput core is being throttled by the scheduler or the
+address mapping.
+
 ## 6. Skill Guide for AI Agents
 
 The tool's own design principle carries over to how an agent should use it:
@@ -358,3 +388,14 @@ For a workload longer than a handful of windows, run this triage against
 `windowed_history_analyze`'s `summary.metrics` (§5.4) rather than
 `report.json`'s single cumulative number — a problem confined to one phase
 of a trace can be invisible in the whole-run average.
+
+**A per-core check the table above can't catch**: that triage explains
+bandwidth loss the *scheduler and address map* can cause. A core can also be
+capped by its own request shape regardless of either — compare
+`core_burst_stats[]` (§5.5) across cores. One core with a visibly smaller
+`mean_bytes`/`p50_bytes` than its peers is paying the same per-command DDRC
+overhead (tRCD/tRP/CAS) over less useful data every time, which limits its
+own achievable throughput independent of anything the scheduler or address
+mapping do. This is a property of the input trace, not a config choice —
+the fix is issuing larger/coalesced bursts upstream of this tool, not
+retuning `address_mapping` or `timing_ns`.

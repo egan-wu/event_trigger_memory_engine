@@ -471,3 +471,64 @@ DDRTEST(high_address_regions_flags_aliasing_but_not_a_base_offset) {
         DDR_CHECK_EQ(engine.summary().page_hit_rate_pct > 74.9, true);
     }
 }
+
+// Hand-computed nearest-rank quantiles, N=8, sizes sorted {64,64,128,128,
+// 256,256,512,512}: p25 rank=ceil(0.25*8)=2 -> 2nd smallest=64, p50
+// rank=ceil(4)=4 -> 4th smallest=128, p75 rank=ceil(6)=6 -> 6th smallest=256.
+// total_bytes=2*(64+128+256+512)=1920, mean=1920/8=240 exactly (no rounding).
+DDRTEST(core_burst_stats_computes_per_core_quantiles_and_stays_separate) {
+    DdrcConfig cfg = make_test_config();
+    Engine engine(cfg);
+
+    uint32_t core0_sizes[] = {64, 64, 128, 128, 256, 256, 512, 512};
+    for (size_t i = 0; i < 8; ++i) {
+        AxiTxn t;
+        t.core_id = 0;
+        t.type = TxnType::Read;
+        t.axi_id = static_cast<uint32_t>(i);
+        t.addr = 0x10000 + i * 0x1000;
+        t.size_bytes = core0_sizes[i];
+        t.len_beats = 1;
+        engine.push_txn(t);
+    }
+
+    // A second, uniform-size core: confirms core 0's histogram doesn't leak
+    // into core 1's, and that a degenerate (single-valued) distribution
+    // correctly collapses every percentile to that one observed value.
+    for (size_t i = 0; i < 3; ++i) {
+        AxiTxn t;
+        t.core_id = 1;
+        t.type = TxnType::Read;
+        t.axi_id = static_cast<uint32_t>(i);
+        t.addr = 0x20000 + i * 0x1000;
+        t.size_bytes = 1024;
+        t.len_beats = 1;
+        engine.push_txn(t);
+    }
+
+    engine.run();
+
+    DDR_CHECK_EQ(engine.num_cores_with_burst_stats(), static_cast<size_t>(2));
+
+    CoreBurstStats c0 = engine.core_burst_stats_at(0);
+    DDR_CHECK_EQ(c0.core_id, 0);
+    DDR_CHECK_EQ(c0.txn_count, 8ull);
+    DDR_CHECK_EQ(c0.total_bytes, 1920ull);
+    DDR_CHECK_EQ(c0.mean_bytes, 240.0);
+    DDR_CHECK_EQ(c0.min_bytes, 64ull);
+    DDR_CHECK_EQ(c0.p25_bytes, 64ull);
+    DDR_CHECK_EQ(c0.p50_bytes, 128ull);
+    DDR_CHECK_EQ(c0.p75_bytes, 256ull);
+    DDR_CHECK_EQ(c0.max_bytes, 512ull);
+
+    CoreBurstStats c1 = engine.core_burst_stats_at(1);
+    DDR_CHECK_EQ(c1.core_id, 1);
+    DDR_CHECK_EQ(c1.txn_count, 3ull);
+    DDR_CHECK_EQ(c1.total_bytes, 3072ull);
+    DDR_CHECK_EQ(c1.mean_bytes, 1024.0);
+    DDR_CHECK_EQ(c1.min_bytes, 1024ull);
+    DDR_CHECK_EQ(c1.p25_bytes, 1024ull);
+    DDR_CHECK_EQ(c1.p50_bytes, 1024ull);
+    DDR_CHECK_EQ(c1.p75_bytes, 1024ull);
+    DDR_CHECK_EQ(c1.max_bytes, 1024ull);
+}

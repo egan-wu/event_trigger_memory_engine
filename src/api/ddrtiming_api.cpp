@@ -238,6 +238,29 @@ int ddrt_get_window_channel_stats(ddrt_engine_t* engine, uint64_t window_index,
     return 0;
 }
 
+uint64_t ddrt_get_num_cores(ddrt_engine_t* engine) {
+    if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    return engine->engine->num_cores_with_burst_stats();
+}
+
+int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_burst_stats_t* out) {
+    if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    if (index >= engine->engine->num_cores_with_burst_stats()) return -1;
+    const ddrtiming::CoreBurstStats s = engine->engine->core_burst_stats_at(index);
+    out->core_id = s.core_id;
+    out->txn_count = s.txn_count;
+    out->total_bytes = s.total_bytes;
+    out->mean_bytes = s.mean_bytes;
+    out->min_bytes = s.min_bytes;
+    out->p25_bytes = s.p25_bytes;
+    out->p50_bytes = s.p50_bytes;
+    out->p75_bytes = s.p75_bytes;
+    out->max_bytes = s.max_bytes;
+    return 0;
+}
+
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {
     if (!engine || !out_path) return -1;
     std::lock_guard<std::mutex> lock(engine->mutex);
@@ -256,4 +279,4 @@ const char* ddrt_last_error(ddrt_engine_t* engine) {
     return engine->last_error.c_str();
 }
 
-const char* ddrt_version(void) { return "0.2.0"; }
+const char* ddrt_version(void) { return "0.3.0"; }

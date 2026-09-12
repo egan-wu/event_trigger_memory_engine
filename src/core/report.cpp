@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
@@ -64,9 +65,30 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
         txns.push_back(std::move(tv));
     }
 
+    // Per-core AXI burst-size distribution -- independent of windowing, so
+    // (unlike "windows" below) this is always populated once at least one
+    // transaction has been pushed. See CoreBurstStats's doc comment for why
+    // percentiles here are exact observed values, not interpolated.
+    json::Value core_burst = json::Value::make_array();
+    for (size_t i = 0; i < engine.num_cores_with_burst_stats(); ++i) {
+        const CoreBurstStats cb = engine.core_burst_stats_at(i);
+        json::Value cv = json::Value::make_object();
+        cv.set("core_id", cb.core_id);
+        cv.set("txn_count", static_cast<int64_t>(cb.txn_count));
+        cv.set("total_bytes", static_cast<int64_t>(cb.total_bytes));
+        cv.set("mean_bytes", cb.mean_bytes);
+        cv.set("min_bytes", static_cast<int64_t>(cb.min_bytes));
+        cv.set("p25_bytes", static_cast<int64_t>(cb.p25_bytes));
+        cv.set("p50_bytes", static_cast<int64_t>(cb.p50_bytes));
+        cv.set("p75_bytes", static_cast<int64_t>(cb.p75_bytes));
+        cv.set("max_bytes", static_cast<int64_t>(cb.max_bytes));
+        core_burst.push_back(std::move(cv));
+    }
+
     json::Value root = json::Value::make_object();
     root.set("summary", std::move(summary));
     root.set("transactions", std::move(txns));
+    root.set("core_burst_stats", std::move(core_burst));
 
     if (!engine.windows().empty()) {
         double window_ns = engine.config().history_window_ns;
@@ -122,7 +144,7 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
 std::string format_summary_text(const Engine& engine) {
     const SummaryStats& s = engine.summary();
     std::ostringstream os;
-    os << "==== DDR Timing Estimate Summary ====\n";
+    os << "==== System Summary ====\n";
     os << "Transactions:            " << s.total_txns << "\n";
     os << "Total bytes (requested): " << s.total_bytes << "\n";
     os << "Total bytes (DRAM/phys): " << s.total_dram_bytes << "\n";
@@ -141,6 +163,27 @@ std::string format_summary_text(const Engine& engine) {
     os << "Bank-group reuse rate:   " << s.bankgroup_reuse_rate_pct << " % (tCCD_L instead of tCCD_S)\n";
     os << "Address map decodes:     bits [0, " << s.mapped_address_bits << ")  -- "
        << s.high_address_regions << " distinct region(s) above that\n";
+
+    // Second block: everything that's broken out per-core, each stat
+    // category as its own labeled sub-table (one line per core) under this
+    // one heading -- AXI burst size is the first; a future per-core stat
+    // (e.g. a row-status or latency breakdown) adds another sub-table here
+    // rather than a new top-level block.
+    if (engine.num_cores_with_burst_stats() > 0) {
+        os << "\n==== Per-Core Summary ====\n";
+
+        os << "AXI burst size (bytes):\n";
+        os << std::right << std::setw(6) << "core" << std::setw(10) << "n" << std::setw(9) << "mean"
+           << std::setw(9) << "min" << std::setw(9) << "p25" << std::setw(9) << "p50"
+           << std::setw(9) << "p75" << std::setw(9) << "max" << "\n";
+        for (size_t i = 0; i < engine.num_cores_with_burst_stats(); ++i) {
+            const CoreBurstStats cb = engine.core_burst_stats_at(i);
+            os << std::setw(6) << cb.core_id << std::setw(10) << cb.txn_count
+               << std::setw(9) << cb.mean_bytes << std::setw(9) << cb.min_bytes
+               << std::setw(9) << cb.p25_bytes << std::setw(9) << cb.p50_bytes
+               << std::setw(9) << cb.p75_bytes << std::setw(9) << cb.max_bytes << "\n";
+        }
+    }
     return os.str();
 }
 

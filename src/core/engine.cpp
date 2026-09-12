@@ -1,6 +1,8 @@
 #include "engine.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <iterator>
 #include <utility>
 
 #include "address_decoder.hpp"
@@ -10,6 +12,23 @@ namespace ddrtiming {
 
 namespace {
 constexpr uint64_t kMinIssueSpacingCycles = 1;
+
+// Nearest-rank percentile over a value->observation-count histogram (a
+// std::map iterates in ascending key order, so this walks values smallest
+// to largest without a separate sort). Returns an observed value, never an
+// interpolated one -- see CoreBurstStats's doc comment for why that's the
+// right choice for a naturally discrete quantity like burst size.
+uint64_t nearest_rank_percentile(const std::map<uint64_t, uint64_t>& hist, uint64_t total, double pct) {
+    if (total == 0) return 0;
+    uint64_t rank = static_cast<uint64_t>(std::ceil(pct / 100.0 * static_cast<double>(total)));
+    rank = std::min(std::max<uint64_t>(rank, 1), total);
+    uint64_t cumulative = 0;
+    for (const auto& [value, count] : hist) {
+        cumulative += count;
+        if (cumulative >= rank) return value;
+    }
+    return hist.empty() ? 0 : hist.rbegin()->first; // unreachable: rank <= total guarantees an early return
+}
 }
 
 Engine::Engine(DdrcConfig cfg) : cfg_(std::move(cfg)) {
@@ -56,6 +75,7 @@ uint64_t Engine::push_txn(const AxiTxn& txn) {
         if (bytes == 0) bytes = txn.size_bytes;
         note_high_address_region(txn.addr);
         if (bytes > 0) note_high_address_region(txn.addr + bytes - 1);
+        core_burst_histogram_[txn.core_id][bytes]++;
     }
     AxiTxn t = txn;
     t.txn_id = next_txn_id_++;
@@ -380,6 +400,31 @@ void Engine::run() {
     }
 
     compute_summary();
+}
+
+CoreBurstStats Engine::core_burst_stats_at(size_t index) const {
+    CoreBurstStats out;
+    if (index >= core_burst_histogram_.size()) return out;
+    auto it = core_burst_histogram_.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    out.core_id = it->first;
+
+    const std::map<uint64_t, uint64_t>& hist = it->second;
+    uint64_t total = 0;
+    uint64_t sum = 0;
+    for (const auto& [bytes, count] : hist) {
+        total += count;
+        sum += bytes * count;
+    }
+    out.txn_count = total;
+    out.total_bytes = sum;
+    out.mean_bytes = total > 0 ? static_cast<double>(sum) / static_cast<double>(total) : 0.0;
+    out.min_bytes = hist.empty() ? 0 : hist.begin()->first;
+    out.max_bytes = hist.empty() ? 0 : hist.rbegin()->first;
+    out.p25_bytes = nearest_rank_percentile(hist, total, 25.0);
+    out.p50_bytes = nearest_rank_percentile(hist, total, 50.0);
+    out.p75_bytes = nearest_rank_percentile(hist, total, 75.0);
+    return out;
 }
 
 void Engine::compute_summary() {
