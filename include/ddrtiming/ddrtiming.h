@@ -80,6 +80,17 @@ typedef struct {
     double attr_other_pct;
     /* [S] Data-bus direction changes; what write_policy "batch" reduces. */
     uint64_t rw_direction_switches;
+    /* [F] Analytical ceilings computed from the config alone (not measured)
+     * -- each is a ceiling under one constraint in isolation, not a combined
+     * achievable maximum. headroom_pct = ceiling_refresh_pct -
+     * bandwidth_utilization_pct. channel_imbalance_ratio is max/min physical
+     * bytes over channels that carried traffic (1.0 if none/one did) -- see
+     * ddrt_get_channel_dram_bytes() for the per-channel breakdown itself. */
+    double ceiling_refresh_pct;
+    double ceiling_tccd_l_gbps;
+    double ceiling_tfaw_gbps;
+    double headroom_pct;
+    double channel_imbalance_ratio;
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the
@@ -214,6 +225,12 @@ uint64_t ddrt_get_num_cores(ddrt_engine_t* engine);
  * ascending core_id order) -- see ddrt_core_burst_stats_t. Returns -1 (out
  * left untouched) for an out-of-range index. */
 int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_burst_stats_t* out);
+
+/* Physical (DRAM-side, full-burst) bytes this channel has moved over the
+ * whole run so far -- the non-windowed counterpart to
+ * ddrt_get_window_channel_stats(); see ddrt_summary_t::channel_imbalance_ratio.
+ * Returns 0 for an out-of-range channel_index (same as no traffic). */
+uint64_t ddrt_get_channel_dram_bytes(ddrt_engine_t* engine, uint64_t channel_index);
 
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path);
 

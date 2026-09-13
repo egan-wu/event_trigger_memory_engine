@@ -75,6 +75,22 @@ struct SummaryStats {
     // behind attr_turnaround_pct/attr_twtr_pct -- and what
     // ddrc_resources.write_policy "batch" is meant to reduce.
     uint64_t rw_direction_switches = 0;
+
+    // [F] Analytical ceilings, computed from the config alone (not measured)
+    // -- for telling "this run is close to what the config can ever do" apart
+    // from "this run has real headroom left". Deliberately narrow: each is a
+    // ceiling under one specific constraint in isolation, not a combined
+    // achievable maximum, so a run can legitimately sit below more than one
+    // of them at once without that being a contradiction.
+    double ceiling_refresh_pct = 0.0;   // 100*(1 - tRFC/tREFI): the refresh-only ceiling
+    double ceiling_tccd_l_gbps = 0.0;   // if every column command paid tCCD_L
+    double ceiling_tfaw_gbps = 0.0;     // if every access were a fresh activate, tFAW-rate-bound
+    double headroom_pct = 0.0;          // ceiling_refresh_pct - bandwidth_utilization_pct
+    // [F] max/min of physical bytes moved per channel, over channels that
+    // carried any traffic (1.0 for a single channel or if none did) -- a
+    // multi-channel config's utilization can look fine in aggregate while
+    // one channel does all the work; see Engine::channel_dram_bytes().
+    double channel_imbalance_ratio = 1.0;
 };
 
 // Distribution of AXI burst sizes (logical bytes requested per transaction,
@@ -274,6 +290,14 @@ public:
     // have been pushed since your last call.
     size_t num_cores_with_burst_stats() const { return core_burst_histogram_.size(); }
     CoreBurstStats core_burst_stats_at(size_t index) const;
+
+    // [F] Physical (DRAM-side, full-burst) bytes moved by each channel over
+    // the whole run so far -- the non-windowed counterpart to
+    // WindowStats::dram_bytes_per_channel, for the same reason: aggregate
+    // bandwidth_utilization_pct can't distinguish "every channel at 50%"
+    // from "one channel maxed, the rest idle". One entry per channel,
+    // channel index order.
+    std::vector<uint64_t> channel_dram_bytes() const;
 
     // Removes every result with txn_id <= max_txn_id from results() (order-
     // independent -- results() is dispatch-ordered, not txn_id-ordered, since

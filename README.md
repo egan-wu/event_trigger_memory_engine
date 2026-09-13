@@ -187,9 +187,10 @@ ddrt_destroy(e);
 | `ddrt_get_num_windows(e)` / `ddrt_get_window_at(e, i, &out)` | windowed history, §5.3 |
 | `ddrt_get_num_channels(e)` / `ddrt_get_window_channel_stats(e, wi, ci, &out)` | per-channel breakdown of one window |
 | `ddrt_get_num_cores(e)` / `ddrt_get_core_burst_stats_at(e, i, &out)` | per-core AXI burst-size distribution, §5.5 |
+| `ddrt_get_channel_dram_bytes(e, channel_index)` | physical bytes one channel moved over the whole run, §5.1 |
 | `ddrt_write_report_json(e, path)` | write the full report (summary + transactions + windows) to JSON |
 | `ddrt_last_error(e)` | error string for the last failed call; pass `NULL` to read a failed `ddrt_create()`'s error |
-| `ddrt_version(void)` | library version string (currently `"0.3.0"`) |
+| `ddrt_version(void)` | library version string (currently `"0.4.0"`) |
 
 For a long-running caller with no natural "end of log" (a daemon pushing
 transactions as they happen): push, call `ddrt_run()` periodically as a
@@ -334,6 +335,11 @@ yet (`ddrt_get_num_cores() == 0`).
 | `high_address_regions` | distinct values seen of the bits *above* `mapped_address_bits`. `1` is normal; `>1` means separate parts of the trace alias onto the same DRAM locations and every rate above is describing a workload that doesn't exist — fix the trace's base addresses or widen the mapping before trusting anything else here |
 | `bus_time_attribution` (JSON object; `attr_*_pct` in the C struct) | where the run's channel-time went — see below |
 | `rw_direction_switches` | times the data bus changed direction. Each costs a turnaround, and each write→read also a tWTR, so this is the count behind `turnaround_pct`/`twtr_pct` — and what `write_policy: "batch"` (§4.3) reduces |
+| `ceiling_refresh_pct` | `100 × (1 − tRFC/tREFI)` — the refresh-only bandwidth ceiling, from the config alone |
+| `ceiling_tccd_l_gbps` / `ceiling_tfaw_gbps` | two more config-only ceilings: bandwidth if every column command paid `tCCD_L`, and bandwidth if every access were a fresh activate (tFAW-rate-bound). Each is a ceiling under one constraint in isolation, not a combined achievable maximum — a run can sit below more than one at once |
+| `headroom_pct` | `ceiling_refresh_pct − bandwidth_utilization_pct` — how much of the refresh-only ceiling is still unclaimed |
+| `channel_imbalance_ratio` | max/min physical bytes moved, over channels that carried traffic (`1.0` for one channel or if none did). See `channel_dram_bytes` below for the per-channel numbers themselves |
+| `channel_dram_bytes` (JSON array; `ddrt_get_channel_dram_bytes(e, i)` in the C API) | physical bytes moved by each channel over the whole run — the non-windowed counterpart to §5.3's per-channel window breakdown |
 
 #### Bus-time attribution
 
@@ -511,6 +517,7 @@ cutoff.
 3. For one run: read `report.json`'s `"summary"` object directly (§5.1) — flat numeric fields, stable names.
 4. For anything beyond a single number — trends, outliers, before/after — don't parse `history.csv` directly: run `windowed_history_analyze --csv history.csv [--baseline other.csv] --out analysis.json` (§5.4) and read that. Its output size is bounded regardless of trace length, and `extremes` hands you the exact window to go inspect instead of you having to scan for it.
 5. Check `summary.high_address_regions` before trusting any hit/conflict/bandwidth number from step 3 — `>1` means the input trace itself aliases onto overlapping DRAM locations, and every other field describes a workload that doesn't exist (§5.1).
+6. Before spending effort optimizing a config, check `summary.headroom_pct` (§5.1) — a run already within a percentage point or two of `ceiling_refresh_pct` has essentially nothing left to gain from address-mapping or scheduler-policy changes; the remaining gap belongs to the refresh interval itself.
 
 **Start with `summary.bus_time_attribution` (§5.1).** It partitions the
 run's channel-time into eight shares that sum to 100%, so the largest

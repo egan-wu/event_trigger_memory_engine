@@ -519,7 +519,57 @@ void Engine::compute_summary() {
 
     s.mapped_address_bits = mapped_address_bits_;
     s.high_address_regions = high_address_regions_.size();
+
+    // [F] Analytical ceilings -- from the config alone, independent of what
+    // actually ran. See SummaryStats's doc comment for why these are kept
+    // separate ceilings rather than combined into one number.
+    if (cfg_.tREFI > 0.0) {
+        s.ceiling_refresh_pct = 100.0 * (1.0 - cfg_.tRFC / cfg_.tREFI);
+    }
+    double burst_bytes = static_cast<double>(std::max(1, cfg_.data_bus_bytes)) *
+                          static_cast<double>(std::max(1, cfg_.burst_beats));
+    if (cfg_.tCCD_L > 0.0) {
+        s.ceiling_tccd_l_gbps = static_cast<double>(std::max(1, cfg_.channels)) * burst_bytes / cfg_.tCCD_L;
+    }
+    if (cfg_.tFAW > 0.0) {
+        s.ceiling_tfaw_gbps = static_cast<double>(std::max(1, cfg_.channels)) *
+                               static_cast<double>(std::max(1, cfg_.ranks_per_channel)) * 4.0 * burst_bytes /
+                               cfg_.tFAW;
+    }
+    s.headroom_pct = s.ceiling_refresh_pct - s.bandwidth_utilization_pct;
+
+    // [F] Per-channel imbalance: max/min physical bytes over channels that
+    // actually carried traffic. A channel that never transferred anything
+    // is excluded rather than forcing the ratio to infinity -- an idle
+    // channel in a config that only ever addresses the others is a mapping
+    // choice already visible in bandwidth_utilization_pct, not something
+    // this ratio needs to also flag.
+    {
+        std::vector<uint64_t> per_channel = channel_dram_bytes();
+        uint64_t lo = ~0ull, hi = 0;
+        for (uint64_t b : per_channel) {
+            if (b == 0) continue;
+            lo = std::min(lo, b);
+            hi = std::max(hi, b);
+        }
+        s.channel_imbalance_ratio = (hi > 0) ? static_cast<double>(hi) / static_cast<double>(lo) : 1.0;
+    }
+
     summary_ = s;
+}
+
+std::vector<uint64_t> Engine::channel_dram_bytes() const {
+    std::vector<uint64_t> out;
+    out.reserve(channels_.size());
+    uint64_t bus_bytes = static_cast<uint64_t>(std::max(1, cfg_.data_bus_bytes));
+    for (const auto& ch : channels_) {
+        // Every busy cycle moves exactly data_bus_bytes bytes (drain_one()
+        // always transfers a full burst, and transfer_cycles is that
+        // burst's byte count divided evenly by data_bus_bytes) -- so this is
+        // exact, not an approximation from rounding busy_cycles back up.
+        out.push_back(ch->stats().busy_cycles * bus_bytes);
+    }
+    return out;
 }
 
 } // namespace ddrtiming

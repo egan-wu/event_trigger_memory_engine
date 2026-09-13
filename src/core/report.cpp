@@ -57,6 +57,17 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     attr.set("other_pct", s.attr_other_pct);
     summary.set("bus_time_attribution", std::move(attr));
     summary.set("rw_direction_switches", static_cast<int64_t>(s.rw_direction_switches));
+    // [F] analytical ceilings + per-channel imbalance
+    summary.set("ceiling_refresh_pct", s.ceiling_refresh_pct);
+    summary.set("ceiling_tccd_l_gbps", s.ceiling_tccd_l_gbps);
+    summary.set("ceiling_tfaw_gbps", s.ceiling_tfaw_gbps);
+    summary.set("headroom_pct", s.headroom_pct);
+    summary.set("channel_imbalance_ratio", s.channel_imbalance_ratio);
+    {
+        json::Value ch_bytes = json::Value::make_array();
+        for (uint64_t b : engine.channel_dram_bytes()) ch_bytes.push_back(json::Value(static_cast<int64_t>(b)));
+        summary.set("channel_dram_bytes", std::move(ch_bytes));
+    }
 
     json::Value txns = json::Value::make_array();
     for (const auto& r : engine.results()) {
@@ -187,6 +198,17 @@ std::string format_summary_text(const Engine& engine) {
     os << "  front-end idle:        " << s.attr_frontend_idle_pct << " %\n";
     os << "  other:                 " << s.attr_other_pct << " %\n";
     os << "R/W direction switches:  " << s.rw_direction_switches << "\n";
+
+    // [F] analytical ceilings + per-channel imbalance -- from the config
+    // alone, not measured, so a run can legitimately sit below more than one
+    // at once.
+    os << "Refresh-only ceiling:    " << s.ceiling_refresh_pct << " %  (headroom "
+       << s.headroom_pct << " pp)\n";
+    os << "tCCD_L-bound ceiling:    " << s.ceiling_tccd_l_gbps << " GB/s (if every command paid tCCD_L)\n";
+    os << "tFAW-bound ceiling:      " << s.ceiling_tfaw_gbps << " GB/s (if every access were a fresh activate)\n";
+    if (engine.config().channels > 1) {
+        os << "Channel imbalance:       " << s.channel_imbalance_ratio << "x (max/min channel bytes)\n";
+    }
 
     // Second block: everything that's broken out per-core, each stat
     // category as its own labeled sub-table (one line per core) under this

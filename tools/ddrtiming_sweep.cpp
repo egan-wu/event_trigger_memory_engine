@@ -194,6 +194,8 @@ const std::vector<std::string>& all_summary_fields() {
         "attr_data_pct", "attr_row_miss_exposed_pct", "attr_refresh_pct",
         "attr_turnaround_pct", "attr_twtr_pct", "attr_tccd_l_excess_pct",
         "attr_frontend_idle_pct", "attr_other_pct", "rw_direction_switches",
+        "ceiling_refresh_pct", "ceiling_tccd_l_gbps", "ceiling_tfaw_gbps",
+        "headroom_pct", "channel_imbalance_ratio",
     };
     return fields;
 }
@@ -227,6 +229,11 @@ bool get_summary_field(const SummaryStats& s, const std::string& name, double& o
     if (name == "attr_frontend_idle_pct") { out = s.attr_frontend_idle_pct; return true; }
     if (name == "attr_other_pct") { out = s.attr_other_pct; return true; }
     if (name == "rw_direction_switches") { out = static_cast<double>(s.rw_direction_switches); return true; }
+    if (name == "ceiling_refresh_pct") { out = s.ceiling_refresh_pct; return true; }
+    if (name == "ceiling_tccd_l_gbps") { out = s.ceiling_tccd_l_gbps; return true; }
+    if (name == "ceiling_tfaw_gbps") { out = s.ceiling_tfaw_gbps; return true; }
+    if (name == "headroom_pct") { out = s.headroom_pct; return true; }
+    if (name == "channel_imbalance_ratio") { out = s.channel_imbalance_ratio; return true; }
     return false;
 }
 

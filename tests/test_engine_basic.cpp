@@ -3,6 +3,7 @@
 #include "core/engine.hpp"
 
 #include <algorithm>
+#include <cmath>
 
 using namespace ddrtiming;
 
@@ -634,4 +635,49 @@ DDRTEST(different_axi_id_completion_is_not_clamped) {
     DDR_CHECK_EQ(r[1].complete_cycle, 31ull); // A unchanged
     DDR_CHECK_EQ(r[2].complete_cycle, 27ull); // B: independent id, unclamped
     DDR_CHECK(r[2].complete_cycle < r[1].complete_cycle);
+}
+
+// Hand-computed analytical ceilings, from make_test_config() alone (no
+// dependence on what actually ran): tREFI=100000, tRFC=50 ->
+// ceiling_refresh_pct = 100*(1 - 50/100000) = 99.95. channels=1,
+// data_bus_bytes=8, burst_beats defaults to 8 -> burst_bytes=64;
+// tCCD_L=1ns -> ceiling_tccd_l_gbps = 1*64/1 = 64. tFAW=4ns,
+// ranks_per_channel=1 -> ceiling_tfaw_gbps = 1*1*4*64/4 = 64.
+DDRTEST(analytical_ceilings_computed_from_config_alone) {
+    DdrcConfig cfg = make_test_config();
+    Engine engine(cfg);
+    engine.push_txn(make_read(0x000)); // just enough to make sim_time_ns > 0
+    engine.run();
+
+    const SummaryStats& s = engine.summary();
+    DDR_CHECK(std::fabs(s.ceiling_refresh_pct - 99.95) < 1e-9);
+    DDR_CHECK(std::fabs(s.ceiling_tccd_l_gbps - 64.0) < 1e-9);
+    DDR_CHECK(std::fabs(s.ceiling_tfaw_gbps - 64.0) < 1e-9);
+    // headroom_pct is exactly the ceiling minus whatever this tiny run's
+    // own (measured) utilization came out to -- not independently
+    // hand-computed here (that's bandwidth_utilization_pct's own job), just
+    // checked for consistency with the two numbers it's defined from.
+    DDR_CHECK(std::fabs(s.headroom_pct - (s.ceiling_refresh_pct - s.bandwidth_utilization_pct)) < 1e-9);
+}
+
+DDRTEST(channel_imbalance_ratio_reflects_uneven_channel_traffic) {
+    DdrcConfig cfg = make_test_config();
+    cfg.channels = 2;
+    cfg.map_channel = AddressField::contiguous(31, 1); // bit 31: core<<32 addresses below stay on channel 0
+    Engine engine(cfg);
+
+    // 3 reads to channel 0 (bit 31 clear), 1 read to channel 1 (bit 31 set)
+    // -- distinct rows so every access is a fresh burst, no hits collapsing
+    // byte counts.
+    engine.push_txn(make_read(0x000));
+    engine.push_txn(make_read(0x800));
+    engine.push_txn(make_read(0x1000));
+    engine.push_txn(make_read(0x80000000ull));
+    engine.run();
+
+    std::vector<uint64_t> per_ch = engine.channel_dram_bytes();
+    DDR_CHECK_EQ(per_ch.size(), static_cast<size_t>(2));
+    DDR_CHECK_EQ(per_ch[0], 3 * 64ull); // 3 bursts of 64B (data_bus_bytes*burst_beats)
+    DDR_CHECK_EQ(per_ch[1], 1 * 64ull);
+    DDR_CHECK(std::fabs(engine.summary().channel_imbalance_ratio - 3.0) < 1e-9);
 }

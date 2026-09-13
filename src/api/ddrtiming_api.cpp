@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "../core/config.hpp"
 #include "../core/engine.hpp"
@@ -144,6 +145,11 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     out->attr_frontend_idle_pct = s.attr_frontend_idle_pct;
     out->attr_other_pct = s.attr_other_pct;
     out->rw_direction_switches = s.rw_direction_switches;
+    out->ceiling_refresh_pct = s.ceiling_refresh_pct;
+    out->ceiling_tccd_l_gbps = s.ceiling_tccd_l_gbps;
+    out->ceiling_tfaw_gbps = s.ceiling_tfaw_gbps;
+    out->headroom_pct = s.headroom_pct;
+    out->channel_imbalance_ratio = s.channel_imbalance_ratio;
     return 0;
 }
 
@@ -271,6 +277,13 @@ int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_cor
     return 0;
 }
 
+uint64_t ddrt_get_channel_dram_bytes(ddrt_engine_t* engine, uint64_t channel_index) {
+    if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    std::vector<uint64_t> bytes = engine->engine->channel_dram_bytes();
+    return channel_index < bytes.size() ? bytes[channel_index] : 0;
+}
+
 int ddrt_write_report_json(ddrt_engine_t* engine, const char* out_path) {
     if (!engine || !out_path) return -1;
     std::lock_guard<std::mutex> lock(engine->mutex);
@@ -289,4 +302,4 @@ const char* ddrt_last_error(ddrt_engine_t* engine) {
     return engine->last_error.c_str();
 }
 
-const char* ddrt_version(void) { return "0.3.0"; }
+const char* ddrt_version(void) { return "0.4.0"; }
