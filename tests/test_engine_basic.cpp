@@ -681,3 +681,61 @@ DDRTEST(channel_imbalance_ratio_reflects_uneven_channel_traffic) {
     DDR_CHECK_EQ(per_ch[1], 1 * 64ull);
     DDR_CHECK(std::fabs(engine.summary().channel_imbalance_ratio - 3.0) < 1e-9);
 }
+
+DDRTEST(latency_percentiles_are_bucketed_and_bounded_by_the_exact_max) {
+    // Two distinct latencies from two distinct commands (empty then hit, so
+    // their complete_cycle - issue_cycle differ) is enough to exercise the
+    // histogram without needing a large population; the property under test
+    // is the ordering/clamp guarantee, not a specific bucket boundary.
+    DdrcConfig cfg = make_test_config();
+    Engine engine(cfg);
+    engine.push_txn(make_read(0x000)); // empty: pays tRCD
+    engine.push_txn(make_read(0x000)); // same page: hit, cheaper
+    engine.run();
+
+    const SummaryStats& s = engine.summary();
+    DDR_CHECK(s.latency_max_ns > 0.0);
+    // The exact max must never be exceeded by a coarser (bucketed)
+    // percentile, even though the bucket edge alone could otherwise land
+    // above it -- see the clamp in compute_summary()/core_runtime_stats_at().
+    DDR_CHECK(s.latency_p50_ns <= s.latency_max_ns + 1e-9);
+    DDR_CHECK(s.latency_p95_ns <= s.latency_max_ns + 1e-9);
+    DDR_CHECK(s.latency_p99_ns <= s.latency_max_ns + 1e-9);
+    DDR_CHECK(s.latency_p50_ns <= s.latency_p95_ns + 1e-9);
+    DDR_CHECK(s.latency_p95_ns <= s.latency_p99_ns + 1e-9);
+
+    DDR_CHECK_EQ(engine.num_core_runtime_stats(), static_cast<size_t>(1));
+    CoreRuntimeStats cr = engine.core_runtime_stats_at(0);
+    DDR_CHECK_EQ(cr.core_id, 0);
+    DDR_CHECK_EQ(cr.txn_count, 2ull);
+    DDR_CHECK_EQ(cr.hits, 1u);
+    DDR_CHECK_EQ(cr.empties, 1u);
+    DDR_CHECK(cr.latency_p50_ns <= s.latency_max_ns + 1e-9);
+}
+
+// Hand-traced with max_outstanding_per_id=1: A (axi_id 0) is admitted with
+// nothing outstanding, so its own issue_cycle owes the cap nothing
+// (outstanding_wait_cycles=0). A is a fresh-bank Empty: ACT at 0, row_ready
+// = 0+tRCD(5) = 5, col_start=5, transfer=8 cycles (64B/8B) -> complete=13.
+// B (same id) can only be admitted once A's slot frees, which
+// finalize_in_progress_txn() does immediately on A's completion: at that
+// point idc.outstanding={13} and max_out_=1, so id_gate=13; the core's own
+// port freed at A's issue_cycle(0)+kMinIssueSpacingCycles(1)=1, which is
+// the "other_floor" -- id_gate(13) is strictly larger, so B's
+// outstanding_wait_cycles = 13-1 = 12 (ns, since clock_mhz=1000 -> 1ns/cycle).
+// A's own wait stays 0, so the core average is (0+12)/2 = 6ns exactly.
+DDRTEST(outstanding_wait_avg_ns_measures_only_the_caps_own_contribution) {
+    DdrcConfig cfg = make_test_config();
+    cfg.max_outstanding_per_id = 1;
+    Engine engine(cfg);
+    engine.push_txn(make_read(0x000, /*axi_id=*/0));
+    engine.push_txn(make_read(0x000, /*axi_id=*/0));
+    engine.run();
+
+    DDR_CHECK_EQ(engine.results().size(), static_cast<size_t>(2));
+    DDR_CHECK_EQ(engine.results()[0].complete_cycle, 13ull);
+
+    CoreRuntimeStats cr = engine.core_runtime_stats_at(0);
+    DDR_CHECK_EQ(cr.txn_count, 2ull);
+    DDR_CHECK(std::fabs(cr.outstanding_wait_avg_ns - 6.0) < 1e-9);
+}

@@ -150,6 +150,10 @@ int ddrt_get_summary(ddrt_engine_t* engine, ddrt_summary_t* out) {
     out->ceiling_tfaw_gbps = s.ceiling_tfaw_gbps;
     out->headroom_pct = s.headroom_pct;
     out->channel_imbalance_ratio = s.channel_imbalance_ratio;
+    out->latency_p50_ns = s.latency_p50_ns;
+    out->latency_p95_ns = s.latency_p95_ns;
+    out->latency_p99_ns = s.latency_p99_ns;
+    out->latency_max_ns = s.latency_max_ns;
     return 0;
 }
 
@@ -274,6 +278,31 @@ int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_cor
     out->p50_bytes = s.p50_bytes;
     out->p75_bytes = s.p75_bytes;
     out->max_bytes = s.max_bytes;
+    return 0;
+}
+
+uint64_t ddrt_get_num_core_runtime_stats(ddrt_engine_t* engine) {
+    if (!engine) return 0;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    return engine->engine->num_core_runtime_stats();
+}
+
+int ddrt_get_core_runtime_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_runtime_stats_t* out) {
+    if (!engine || !out) return -1;
+    std::lock_guard<std::mutex> lock(engine->mutex);
+    if (index >= engine->engine->num_core_runtime_stats()) return -1;
+    const ddrtiming::CoreRuntimeStats s = engine->engine->core_runtime_stats_at(index);
+    out->core_id = s.core_id;
+    out->txn_count = s.txn_count;
+    out->read_bytes = s.read_bytes;
+    out->write_bytes = s.write_bytes;
+    out->hits = s.hits;
+    out->conflicts = s.conflicts;
+    out->empties = s.empties;
+    out->avg_latency_ns = s.avg_latency_ns;
+    out->latency_p50_ns = s.latency_p50_ns;
+    out->latency_p95_ns = s.latency_p95_ns;
+    out->outstanding_wait_avg_ns = s.outstanding_wait_avg_ns;
     return 0;
 }
 

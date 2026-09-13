@@ -31,6 +31,38 @@ uint64_t nearest_rank_percentile(const std::map<uint64_t, uint64_t>& hist, uint6
 }
 }
 
+// [F] Latency histogram: 2 buckets per octave, so ns=1 falls in bucket 0
+// ([1, 2^0.5)), ns=1.5 in bucket 1 ([2^0.5, 2)), and so on -- edges double
+// every 2 buckets. Clamped at both ends: anything under 1ns (including 0)
+// goes in bucket 0, anything at or above 2^32 ns saturates the last bucket
+// (its own upper edge is reported for the max percentile bucket regardless,
+// so this only affects how finely values above ~4.3s are told apart, not
+// whether they're counted).
+size_t Engine::latency_bucket_index(double latency_ns) {
+    double clamped = std::max(1.0, latency_ns);
+    double raw = std::floor(2.0 * std::log2(clamped));
+    if (raw < 0.0) raw = 0.0;
+    size_t idx = static_cast<size_t>(raw);
+    return std::min(idx, kLatencyBuckets - 1);
+}
+
+double Engine::latency_bucket_upper_edge_ns(size_t index) {
+    return std::pow(2.0, static_cast<double>(index + 1) / 2.0);
+}
+
+double Engine::percentile_from_latency_hist(const std::array<uint64_t, kLatencyBuckets>& hist, uint64_t total,
+                                             double pct) {
+    if (total == 0) return 0.0;
+    uint64_t rank = static_cast<uint64_t>(std::ceil(pct / 100.0 * static_cast<double>(total)));
+    rank = std::min(std::max<uint64_t>(rank, 1), total);
+    uint64_t cumulative = 0;
+    for (size_t i = 0; i < kLatencyBuckets; ++i) {
+        cumulative += hist[i];
+        if (cumulative >= rank) return latency_bucket_upper_edge_ns(i);
+    }
+    return latency_bucket_upper_edge_ns(kLatencyBuckets - 1); // unreachable: rank <= total
+}
+
 Engine::Engine(DdrcConfig cfg) : cfg_(std::move(cfg)) {
     int nchannels = std::max(1, cfg_.channels);
     channels_.reserve(static_cast<size_t>(nchannels));
@@ -216,9 +248,28 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
     cum_total_bytes_ += res.bytes;
     cum_total_dram_bytes_ += res.dram_bytes;
     cum_latency_sum_ns_ += res.latency_ns;
+    cum_latency_max_ns_ = std::max(cum_latency_max_ns_, res.latency_ns);
     cum_max_complete_cycle_ = std::max(cum_max_complete_cycle_, res.complete_cycle);
 
     idc.outstanding.insert(complete);
+
+    // [F] Per-core completion-time stats -- see CoreRuntimeStats. Recorded
+    // here (not at push/issue time) since latency, row status and the
+    // outstanding-cap charge are only known once a transaction has actually
+    // completed.
+    {
+        CoreRuntimeAccum& acc = core_runtime_[core_id];
+        acc.txn_count++;
+        if (res.type == TxnType::Read) acc.read_bytes += res.bytes;
+        else acc.write_bytes += res.bytes;
+        acc.hits += res.hits;
+        acc.conflicts += res.conflicts;
+        acc.empties += res.empties;
+        acc.latency_sum_ns += res.latency_ns;
+        acc.latency_max_ns = std::max(acc.latency_max_ns, res.latency_ns);
+        acc.latency_hist[latency_bucket_index(res.latency_ns)]++;
+        acc.outstanding_wait_sum_ns += static_cast<double>(ip.outstanding_wait_cycles) * cfg_.clock_period_ns();
+    }
 
     if (ip.has_window) {
         WindowStats& w = windows_[ip.window_index];
@@ -352,6 +403,14 @@ void Engine::run() {
             ip.next_chunk_idx = 0;
             ip.chunks_dispatched = 0;
             ip.max_complete = issue_cycle;
+            // [F] Only charge the outstanding cap when it was the strictly
+            // binding term above the other two floors -- if the port or the
+            // barrier gate was already at or past id_gate, the cap added
+            // nothing this txn wouldn't have waited for anyway.
+            {
+                uint64_t other_floor = std::max(port_free, seg.gate_cycle);
+                ip.outstanding_wait_cycles = (id_gate > other_floor) ? (id_gate - other_floor) : 0;
+            }
 
             if (history_window_cycles_ > 0) {
                 size_t window_index = static_cast<size_t>(issue_cycle / history_window_cycles_);
@@ -437,6 +496,29 @@ CoreBurstStats Engine::core_burst_stats_at(size_t index) const {
     return out;
 }
 
+CoreRuntimeStats Engine::core_runtime_stats_at(size_t index) const {
+    CoreRuntimeStats out;
+    if (index >= core_runtime_.size()) return out;
+    auto it = core_runtime_.begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    out.core_id = it->first;
+    const CoreRuntimeAccum& acc = it->second;
+
+    out.txn_count = acc.txn_count;
+    out.read_bytes = acc.read_bytes;
+    out.write_bytes = acc.write_bytes;
+    out.hits = acc.hits;
+    out.conflicts = acc.conflicts;
+    out.empties = acc.empties;
+    if (acc.txn_count > 0) {
+        out.avg_latency_ns = acc.latency_sum_ns / static_cast<double>(acc.txn_count);
+        out.outstanding_wait_avg_ns = acc.outstanding_wait_sum_ns / static_cast<double>(acc.txn_count);
+    }
+    out.latency_p50_ns = std::min(percentile_from_latency_hist(acc.latency_hist, acc.txn_count, 50.0), acc.latency_max_ns);
+    out.latency_p95_ns = std::min(percentile_from_latency_hist(acc.latency_hist, acc.txn_count, 95.0), acc.latency_max_ns);
+    return out;
+}
+
 void Engine::compute_summary() {
     SummaryStats s;
     s.total_txns = cum_total_txns_;
@@ -458,6 +540,19 @@ void Engine::compute_summary() {
     }
     if (s.total_txns > 0) {
         s.avg_latency_ns = cum_latency_sum_ns_ / static_cast<double>(s.total_txns);
+    }
+    s.latency_max_ns = cum_latency_max_ns_;
+    // [F] Overall latency percentiles: sum every core's histogram rather
+    // than keeping a separate overall one -- one fewer thing to touch per
+    // completion, and the per-core breakdown already has to exist.
+    {
+        std::array<uint64_t, kLatencyBuckets> total_hist{};
+        for (const auto& [cid, acc] : core_runtime_) {
+            for (size_t i = 0; i < kLatencyBuckets; ++i) total_hist[i] += acc.latency_hist[i];
+        }
+        s.latency_p50_ns = std::min(percentile_from_latency_hist(total_hist, s.total_txns, 50.0), s.latency_max_ns);
+        s.latency_p95_ns = std::min(percentile_from_latency_hist(total_hist, s.total_txns, 95.0), s.latency_max_ns);
+        s.latency_p99_ns = std::min(percentile_from_latency_hist(total_hist, s.total_txns, 99.0), s.latency_max_ns);
     }
 
     uint64_t total_hits = 0, total_conflicts = 0, total_empties = 0;

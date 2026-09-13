@@ -187,6 +187,7 @@ ddrt_destroy(e);
 | `ddrt_get_num_windows(e)` / `ddrt_get_window_at(e, i, &out)` | windowed history, §5.3 |
 | `ddrt_get_num_channels(e)` / `ddrt_get_window_channel_stats(e, wi, ci, &out)` | per-channel breakdown of one window |
 | `ddrt_get_num_cores(e)` / `ddrt_get_core_burst_stats_at(e, i, &out)` | per-core AXI burst-size distribution, §5.5 |
+| `ddrt_get_num_core_runtime_stats(e)` / `ddrt_get_core_runtime_stats_at(e, i, &out)` | per-core completion-time stats (latency, row status, outstanding wait), §5.6 |
 | `ddrt_get_channel_dram_bytes(e, channel_index)` | physical bytes one channel moved over the whole run, §5.1 |
 | `ddrt_write_report_json(e, path)` | write the full report (summary + transactions + windows) to JSON |
 | `ddrt_last_error(e)` | error string for the last failed call; pass `NULL` to read a failed `ddrt_create()`'s error |
@@ -281,12 +282,12 @@ error -- those exit `1` before any point runs; a sweep where every point ran
 Three ways to read the same underlying fields: the CLI's plain-text summary
 (printed to stdout on every run — human-oriented, not meant to be parsed;
 see §5.0), JSON (`ddrt_write_report_json` / CLI `--out`, shape
-`{"summary": {...}, "transactions": [...], "core_burst_stats": [...], "windows": [...]}`,
+`{"summary": {...}, "transactions": [...], "core_burst_stats": [...], "core_runtime_stats": [...], "windows": [...]}`,
 `"windows"` present only when windowing is enabled), or the C API's typed
 structs (`ddrt_get_summary` / `ddrt_get_result_at` / `ddrt_get_core_burst_stats_at`
-/ `ddrt_get_window_at`). `summary()` is always cumulative since the engine
-was created, regardless of what `prune_results_before()` has removed from
-`results()`.
+/ `ddrt_get_core_runtime_stats_at` / `ddrt_get_window_at`). `summary()` is
+always cumulative since the engine was created, regardless of what
+`prune_results_before()` has removed from `results()`.
 
 ### 5.0 Plain-text CLI summary
 
@@ -327,6 +328,8 @@ yet (`ddrt_get_num_cores() == 0`).
 | `bandwidth_utilization_pct` | `avg_dram_bandwidth_gbps / peak_bandwidth_gbps × 100` (physical, bus-side) |
 | `burst_efficiency_pct` | `total_bytes / total_dram_bytes × 100` — 100% = no over-fetch waste |
 | `avg_latency_ns` | mean `(complete_cycle − issue_cycle)` across all transactions, in ns |
+| `latency_p50_ns` / `latency_p95_ns` / `latency_p99_ns` | approximate percentiles from a fixed log-scale histogram (2 buckets per power-of-two octave) — each is the *upper edge* of the bucket containing that percentile's observation, not an interpolated value, then clamped to `latency_max_ns` so `p50 ≤ p95 ≤ p99 ≤ max` always holds |
+| `latency_max_ns` | exact (not bucketed) maximum transaction latency |
 | `page_hit_rate_pct` / `row_conflict_rate_pct` / `row_empty_rate_pct` | classification per DRAM column command (not per transaction — sum to 100%) |
 | `bankgroup_reuse_rate_pct` | % of column commands that paid `tCCD_L` (same bank group as the previous command) instead of `tCCD_S` |
 | `refresh_overhead_pct` | % of total channel-cycles spent blocked on refresh |
@@ -501,6 +504,31 @@ actually sent, never a synthetic in-between number. A core whose `mean_bytes`/
 assuming a low-throughput core is being throttled by the scheduler or the
 address mapping.
 
+### 5.6 Per-core completion-time stats (`ddrt_core_runtime_stats_t`, JSON `"core_runtime_stats"[]`)
+
+A second, independent per-core breakdown alongside §5.5 — kept separate
+because it's recorded at a different point in a transaction's life: burst
+size is known when a transaction is *pushed*, everything here only once one
+actually *completes*. A core can therefore appear in one array before the
+other mid-run (e.g. a brand-new core that has pushed work but not yet
+finished any of it). Same indexing convention as §5.5 (ascending `core_id`,
+re-check the count before iterating).
+
+| field | meaning |
+|---|---|
+| `core_id`, `txn_count` | which core, and how many of its transactions have completed |
+| `read_bytes`, `write_bytes` | logical bytes moved, split by direction |
+| `hits`, `conflicts`, `empties` | row-status classification for this core's own commands |
+| `avg_latency_ns`, `latency_p50_ns`, `latency_p95_ns` | this core's own latency distribution — same bucketing/clamping as §5.1's whole-run percentiles |
+| `outstanding_wait_avg_ns` | mean, per completed transaction on this core, of the time it sat front-end-ready but was held back specifically because its `(core_id, axi_id)` stream was at `max_outstanding_per_id` — `0` for a core the cap never actually bound, even if the cap is configured low |
+
+`outstanding_wait_avg_ns` is the direct way to tell "this core is slow
+because of its own outstanding cap" apart from every other cause in the
+§6 triage table below: a core with a high value here is front-end-limited,
+not DRAM-limited, and the fix is raising `max_outstanding_per_id` (or, if
+it's already generous, the core's own request pattern) rather than
+touching the address map or scheduler policy.
+
 ## 6. Skill Guide for AI Agents
 
 The tool's own design principle carries over to how an agent should use it:
@@ -559,3 +587,13 @@ own achievable throughput independent of anything the scheduler or address
 mapping do. This is a property of the input trace, not a config choice —
 the fix is issuing larger/coalesced bursts upstream of this tool, not
 retuning `address_mapping` or `timing_ns`.
+
+**A second per-core check, this time front-end rather than DRAM-side**:
+`core_runtime_stats[].outstanding_wait_avg_ns` (§5.6) isolates exactly how
+much of a core's own delay came from its `(core_id, axi_id)` stream sitting
+at `max_outstanding_per_id` — as opposed to DRAM timing, the address map, or
+its own request size (the check just above). A core with a high value here
+and otherwise-unremarkable `bus_time_attribution`/`bankgroup_reuse_rate_pct`
+numbers is throttled by its own outstanding cap; raising
+`max_outstanding_per_id` (§4.3) is the direct lever, not anything on the
+DRAM side.

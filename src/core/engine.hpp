@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <deque>
 #include <map>
 #include <memory>
@@ -91,6 +92,20 @@ struct SummaryStats {
     // multi-channel config's utilization can look fine in aggregate while
     // one channel does all the work; see Engine::channel_dram_bytes().
     double channel_imbalance_ratio = 1.0;
+
+    // [F] Latency distribution, whole run. avg_latency_ns above is the mean;
+    // these are approximate percentiles from a fixed log-scale histogram
+    // (see kLatencyBuckets in engine.cpp) -- each is the *upper edge* of the
+    // bucket containing the nearest-rank observation, coarsened to the
+    // bucket's resolution (~41% relative width) rather than interpolated.
+    // latency_max_ns is exact (tracked independently of the histogram) and
+    // every percentile is clamped to it, so p50 <= p95 <= p99 <= max always
+    // holds even when the true value and its bucket edge fall either side
+    // of the exact maximum.
+    double latency_p50_ns = 0.0;
+    double latency_p95_ns = 0.0;
+    double latency_p99_ns = 0.0;
+    double latency_max_ns = 0.0;
 };
 
 // Distribution of AXI burst sizes (logical bytes requested per transaction,
@@ -115,6 +130,34 @@ struct CoreBurstStats {
     uint64_t p50_bytes = 0; // median
     uint64_t p75_bytes = 0;
     uint64_t max_bytes = 0;
+};
+
+// A second, independent per-core breakdown alongside CoreBurstStats -- kept
+// as its own struct/array rather than folded into CoreBurstStats because
+// it's recorded at a different point in a transaction's life: burst size is
+// known at push_txn() (an input-stream property), everything here is only
+// known once a transaction actually completes (a scheduling outcome). See
+// Engine::core_runtime_stats_at(). Percentiles use the same log-scale
+// histogram and "bucket upper edge" convention as SummaryStats's
+// latency_p50_ns/etc. -- see that struct's comment.
+struct CoreRuntimeStats {
+    int core_id = 0;
+    uint64_t txn_count = 0;
+    uint64_t read_bytes = 0;
+    uint64_t write_bytes = 0;
+    uint64_t hits = 0, conflicts = 0, empties = 0;
+    double avg_latency_ns = 0.0;
+    double latency_p50_ns = 0.0;
+    double latency_p95_ns = 0.0;
+    // Mean, per completed transaction on this core, of the cycles (as ns)
+    // it sat ready at the front end but held back specifically because its
+    // (core_id, axi_id) stream was at max_outstanding_per_id -- i.e. the
+    // portion of its issue delay attributable to that cap rather than to
+    // the core's own port or a barrier gate. 0 for a core that was never
+    // actually gated by the cap, even if the cap is configured low; see
+    // IdCursor::InProgress::outstanding_wait_cycles for exactly which term
+    // this measures.
+    double outstanding_wait_avg_ns = 0.0;
 };
 
 // One fixed-size bucket of simulated time (history_window_ns in the config),
@@ -225,6 +268,13 @@ struct IdCursor {
         RowStatus dominant_row_status = RowStatus::Empty;
         bool has_window = false;
         size_t window_index = 0;
+        // [F] Set once, when issue_cycle is finalized in Engine::run(): the
+        // portion of that cycle contributed by this id's outstanding cap
+        // being the strictly-binding term over the core's own port and the
+        // segment's barrier gate (0 if it wasn't -- including when the cap
+        // never bound at all). Carried through to finalize_in_progress_txn()
+        // for CoreRuntimeStats::outstanding_wait_avg_ns.
+        uint64_t outstanding_wait_cycles = 0;
     };
     InProgress in_progress;
 };
@@ -291,6 +341,14 @@ public:
     size_t num_cores_with_burst_stats() const { return core_burst_histogram_.size(); }
     CoreBurstStats core_burst_stats_at(size_t index) const;
 
+    // [F] Per-core completion-time stats -- see CoreRuntimeStats. Same
+    // indexing convention as core_burst_stats_at() (ascending core_id
+    // order, re-check the count before iterating), but populated from a
+    // different, independent accumulator: a core only appears here once one
+    // of its transactions has actually completed, not merely been pushed.
+    size_t num_core_runtime_stats() const { return core_runtime_.size(); }
+    CoreRuntimeStats core_runtime_stats_at(size_t index) const;
+
     // [F] Physical (DRAM-side, full-burst) bytes moved by each channel over
     // the whole run so far -- the non-windowed counterpart to
     // WindowStats::dram_bytes_per_channel, for the same reason: aggregate
@@ -342,6 +400,7 @@ private:
     uint64_t cum_total_dram_bytes_ = 0;
     uint64_t cum_max_complete_cycle_ = 0;
     double cum_latency_sum_ns_ = 0.0;
+    double cum_latency_max_ns_ = 0.0; // [F] exact, independent of the histogram's bucketing
 
     std::vector<WindowStats> windows_;
     uint64_t history_window_cycles_ = 0; // 0 = windowed accounting disabled
@@ -365,6 +424,34 @@ private:
     // many transactions are pushed, while still giving exact (not sampled or
     // approximated) quantiles.
     std::map<int, std::map<uint64_t, uint64_t>> core_burst_histogram_;
+
+    // [F] Fixed log-scale latency histogram: 2 buckets per power-of-two
+    // octave (~41% relative width, i.e. edges at 1, 2^0.5, 2, 2^1.5, 4, ...
+    // ns), 64 buckets reaching up to 2^32 ns (~4.3s) -- see
+    // SummaryStats::latency_p50_ns's comment for why percentiles report a
+    // bucket's upper edge rather than an interpolated value. Kept as a
+    // small fixed array (not a map) since it's touched once per completed
+    // transaction and every core needs its own.
+    static constexpr size_t kLatencyBuckets = 64;
+    static size_t latency_bucket_index(double latency_ns);
+    static double latency_bucket_upper_edge_ns(size_t index);
+    static double percentile_from_latency_hist(const std::array<uint64_t, kLatencyBuckets>& hist,
+                                                uint64_t total, double pct);
+
+    // [F] Per-core completion-time accumulator behind CoreRuntimeStats --
+    // updated once per finalized transaction (finalize_in_progress_txn()),
+    // cumulative since the engine was created like core_burst_histogram_
+    // above, just keyed on a different lifecycle event.
+    struct CoreRuntimeAccum {
+        uint64_t txn_count = 0;
+        uint64_t read_bytes = 0, write_bytes = 0;
+        uint64_t hits = 0, conflicts = 0, empties = 0;
+        double latency_sum_ns = 0.0;
+        double latency_max_ns = 0.0; // exact; clamps this core's bucketed percentiles below
+        std::array<uint64_t, kLatencyBuckets> latency_hist{};
+        double outstanding_wait_sum_ns = 0.0;
+    };
+    std::map<int, CoreRuntimeAccum> core_runtime_;
 
     void enqueue_if_ready(int core_id, int segment_idx, uint32_t axi_id);
     void compute_summary();

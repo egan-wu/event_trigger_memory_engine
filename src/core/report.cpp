@@ -63,6 +63,10 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     summary.set("ceiling_tfaw_gbps", s.ceiling_tfaw_gbps);
     summary.set("headroom_pct", s.headroom_pct);
     summary.set("channel_imbalance_ratio", s.channel_imbalance_ratio);
+    summary.set("latency_p50_ns", s.latency_p50_ns);
+    summary.set("latency_p95_ns", s.latency_p95_ns);
+    summary.set("latency_p99_ns", s.latency_p99_ns);
+    summary.set("latency_max_ns", s.latency_max_ns);
     {
         json::Value ch_bytes = json::Value::make_array();
         for (uint64_t b : engine.channel_dram_bytes()) ch_bytes.push_back(json::Value(static_cast<int64_t>(b)));
@@ -108,10 +112,31 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
         core_burst.push_back(std::move(cv));
     }
 
+    // [F] Per-core completion-time stats -- a second, independent per-core
+    // breakdown alongside core_burst_stats above; see CoreRuntimeStats.
+    json::Value core_runtime = json::Value::make_array();
+    for (size_t i = 0; i < engine.num_core_runtime_stats(); ++i) {
+        const CoreRuntimeStats cr = engine.core_runtime_stats_at(i);
+        json::Value cv = json::Value::make_object();
+        cv.set("core_id", cr.core_id);
+        cv.set("txn_count", static_cast<int64_t>(cr.txn_count));
+        cv.set("read_bytes", static_cast<int64_t>(cr.read_bytes));
+        cv.set("write_bytes", static_cast<int64_t>(cr.write_bytes));
+        cv.set("hits", static_cast<int64_t>(cr.hits));
+        cv.set("conflicts", static_cast<int64_t>(cr.conflicts));
+        cv.set("empties", static_cast<int64_t>(cr.empties));
+        cv.set("avg_latency_ns", cr.avg_latency_ns);
+        cv.set("latency_p50_ns", cr.latency_p50_ns);
+        cv.set("latency_p95_ns", cr.latency_p95_ns);
+        cv.set("outstanding_wait_avg_ns", cr.outstanding_wait_avg_ns);
+        core_runtime.push_back(std::move(cv));
+    }
+
     json::Value root = json::Value::make_object();
     root.set("summary", std::move(summary));
     root.set("transactions", std::move(txns));
     root.set("core_burst_stats", std::move(core_burst));
+    root.set("core_runtime_stats", std::move(core_runtime));
 
     if (!engine.windows().empty()) {
         double window_ns = engine.config().history_window_ns;
@@ -178,6 +203,8 @@ std::string format_summary_text(const Engine& engine) {
     os << "Bandwidth utilization:   " << s.bandwidth_utilization_pct << " %\n";
     os << "Burst efficiency:        " << s.burst_efficiency_pct << " %\n";
     os << "Avg latency:             " << s.avg_latency_ns << " ns\n";
+    os << "Latency p50/p95/p99/max: " << s.latency_p50_ns << " / " << s.latency_p95_ns << " / "
+       << s.latency_p99_ns << " / " << s.latency_max_ns << " ns\n";
     os << "Page-hit rate:           " << s.page_hit_rate_pct << " %\n";
     os << "Row-conflict rate:       " << s.row_conflict_rate_pct << " %\n";
     os << "Row-empty rate:          " << s.row_empty_rate_pct << " %\n";
@@ -215,19 +242,45 @@ std::string format_summary_text(const Engine& engine) {
     // one heading -- AXI burst size is the first; a future per-core stat
     // (e.g. a row-status or latency breakdown) adds another sub-table here
     // rather than a new top-level block.
-    if (engine.num_cores_with_burst_stats() > 0) {
+    bool have_burst = engine.num_cores_with_burst_stats() > 0;
+    bool have_runtime = engine.num_core_runtime_stats() > 0;
+    if (have_burst || have_runtime) {
         os << "\n==== Per-Core Summary ====\n";
 
-        os << "AXI burst size (bytes):\n";
-        os << std::right << std::setw(6) << "core" << std::setw(10) << "n" << std::setw(9) << "mean"
-           << std::setw(9) << "min" << std::setw(9) << "p25" << std::setw(9) << "p50"
-           << std::setw(9) << "p75" << std::setw(9) << "max" << "\n";
-        for (size_t i = 0; i < engine.num_cores_with_burst_stats(); ++i) {
-            const CoreBurstStats cb = engine.core_burst_stats_at(i);
-            os << std::setw(6) << cb.core_id << std::setw(10) << cb.txn_count
-               << std::setw(9) << cb.mean_bytes << std::setw(9) << cb.min_bytes
-               << std::setw(9) << cb.p25_bytes << std::setw(9) << cb.p50_bytes
-               << std::setw(9) << cb.p75_bytes << std::setw(9) << cb.max_bytes << "\n";
+        if (have_burst) {
+            os << "AXI burst size (bytes):\n";
+            os << std::right << std::setw(6) << "core" << std::setw(10) << "n" << std::setw(9) << "mean"
+               << std::setw(9) << "min" << std::setw(9) << "p25" << std::setw(9) << "p50"
+               << std::setw(9) << "p75" << std::setw(9) << "max" << "\n";
+            for (size_t i = 0; i < engine.num_cores_with_burst_stats(); ++i) {
+                const CoreBurstStats cb = engine.core_burst_stats_at(i);
+                os << std::setw(6) << cb.core_id << std::setw(10) << cb.txn_count
+                   << std::setw(9) << cb.mean_bytes << std::setw(9) << cb.min_bytes
+                   << std::setw(9) << cb.p25_bytes << std::setw(9) << cb.p50_bytes
+                   << std::setw(9) << cb.p75_bytes << std::setw(9) << cb.max_bytes << "\n";
+            }
+        }
+
+        // [F] Second sub-table: completion-time stats. A core can appear
+        // here even if it never showed up above in a mid-run report from a
+        // long-running caller (results not yet finalized for a brand-new
+        // core), which is why this checks its own count rather than
+        // reusing have_burst -- see CoreRuntimeStats's doc comment.
+        if (have_runtime) {
+            os << "Row status / latency (completed transactions):\n";
+            os << std::right << std::setw(6) << "core" << std::setw(10) << "n" << std::setw(9) << "hit%"
+               << std::setw(9) << "conf%" << std::setw(9) << "avg_ns" << std::setw(9) << "p50_ns"
+               << std::setw(9) << "p95_ns" << std::setw(11) << "wait_ns" << "\n";
+            for (size_t i = 0; i < engine.num_core_runtime_stats(); ++i) {
+                const CoreRuntimeStats cr = engine.core_runtime_stats_at(i);
+                uint64_t total_cmds = cr.hits + cr.conflicts + cr.empties;
+                double hit_pct = total_cmds > 0 ? static_cast<double>(cr.hits) / total_cmds * 100.0 : 0.0;
+                double conf_pct = total_cmds > 0 ? static_cast<double>(cr.conflicts) / total_cmds * 100.0 : 0.0;
+                os << std::setw(6) << cr.core_id << std::setw(10) << cr.txn_count
+                   << std::setw(9) << hit_pct << std::setw(9) << conf_pct
+                   << std::setw(9) << cr.avg_latency_ns << std::setw(9) << cr.latency_p50_ns
+                   << std::setw(9) << cr.latency_p95_ns << std::setw(11) << cr.outstanding_wait_avg_ns << "\n";
+            }
         }
     }
     return os.str();

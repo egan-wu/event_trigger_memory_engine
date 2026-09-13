@@ -196,6 +196,7 @@ const std::vector<std::string>& all_summary_fields() {
         "attr_frontend_idle_pct", "attr_other_pct", "rw_direction_switches",
         "ceiling_refresh_pct", "ceiling_tccd_l_gbps", "ceiling_tfaw_gbps",
         "headroom_pct", "channel_imbalance_ratio",
+        "latency_p50_ns", "latency_p95_ns", "latency_p99_ns", "latency_max_ns",
     };
     return fields;
 }
@@ -234,6 +235,10 @@ bool get_summary_field(const SummaryStats& s, const std::string& name, double& o
     if (name == "ceiling_tfaw_gbps") { out = s.ceiling_tfaw_gbps; return true; }
     if (name == "headroom_pct") { out = s.headroom_pct; return true; }
     if (name == "channel_imbalance_ratio") { out = s.channel_imbalance_ratio; return true; }
+    if (name == "latency_p50_ns") { out = s.latency_p50_ns; return true; }
+    if (name == "latency_p95_ns") { out = s.latency_p95_ns; return true; }
+    if (name == "latency_p99_ns") { out = s.latency_p99_ns; return true; }
+    if (name == "latency_max_ns") { out = s.latency_max_ns; return true; }
     return false;
 }
 

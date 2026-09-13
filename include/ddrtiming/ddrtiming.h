@@ -91,6 +91,13 @@ typedef struct {
     double ceiling_tfaw_gbps;
     double headroom_pct;
     double channel_imbalance_ratio;
+    /* [F] Latency distribution, whole run -- approximate percentiles from a
+     * fixed log-scale histogram (bucket upper edge, never smaller than the
+     * true percentile); latency_max_ns is exact. See README S5.1. */
+    double latency_p50_ns;
+    double latency_p95_ns;
+    double latency_p99_ns;
+    double latency_max_ns;
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the
@@ -151,6 +158,29 @@ typedef struct {
     uint64_t p75_bytes;
     uint64_t max_bytes;
 } ddrt_core_burst_stats_t;
+
+/* A second, independent per-core breakdown alongside ddrt_core_burst_stats_t
+ * -- recorded at a different point in a transaction's life (only once it
+ * completes, not when pushed), so it can populate a different set of cores
+ * mid-run than the burst-size table. See
+ * ddrt_get_num_core_runtime_stats()/ddrt_get_core_runtime_stats_at(). */
+typedef struct {
+    int core_id;
+    uint64_t txn_count;
+    uint64_t read_bytes;
+    uint64_t write_bytes;
+    uint64_t hits;
+    uint64_t conflicts;
+    uint64_t empties;
+    double avg_latency_ns;
+    double latency_p50_ns;
+    double latency_p95_ns;
+    /* Mean, per completed transaction on this core, of the time it sat
+     * ready at the front end but was held back specifically by this
+     * (core_id, axi_id) stream's max_outstanding_per_id cap -- 0 if the cap
+     * never actually bound for this core. */
+    double outstanding_wait_avg_ns;
+} ddrt_core_runtime_stats_t;
 
 /* Per-channel breakdown for one window -- see ddrt_get_window_channel_stats().
  * Exists because the aggregate ddrt_window_stats_t above can't distinguish
@@ -225,6 +255,12 @@ uint64_t ddrt_get_num_cores(ddrt_engine_t* engine);
  * ascending core_id order) -- see ddrt_core_burst_stats_t. Returns -1 (out
  * left untouched) for an out-of-range index. */
 int ddrt_get_core_burst_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_burst_stats_t* out);
+
+/* Same indexing convention as ddrt_get_num_cores()/ddrt_get_core_burst_stats_at()
+ * (ascending core_id, re-check the count before iterating), but backed by
+ * the independent completion-time accumulator -- see ddrt_core_runtime_stats_t. */
+uint64_t ddrt_get_num_core_runtime_stats(ddrt_engine_t* engine);
+int ddrt_get_core_runtime_stats_at(ddrt_engine_t* engine, uint64_t index, ddrt_core_runtime_stats_t* out);
 
 /* Physical (DRAM-side, full-burst) bytes this channel has moved over the
  * whole run so far -- the non-windowed counterpart to
