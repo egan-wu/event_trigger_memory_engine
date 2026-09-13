@@ -1,12 +1,15 @@
 #include "report.hpp"
 
 #include <algorithm>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
 
 #include "json.hpp"
+#include "sha256.hpp"
+#include "version.hpp"
 
 namespace ddrtiming {
 
@@ -20,9 +23,44 @@ const char* row_status_str(RowStatus s) {
     return "unknown";
 }
 const char* txn_type_str(TxnType t) { return t == TxnType::Read ? "AR" : "AW"; }
+
+// [C] Reads a whole file as raw bytes for hashing (not text-mode: a
+// provenance hash must see exactly the bytes that were actually loaded,
+// line endings included, or the same file could hash differently on
+// different platforms). Throws the same way json::parse_file/
+// parse_axi_log_file do on a missing/unreadable file, since a provenance
+// block that silently omits or fakes a hash for a file it couldn't read
+// would be worse than no provenance at all.
+std::string read_file_bytes(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("cannot open file for provenance hashing: " + path);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+int64_t count_lines(const std::string& bytes) {
+    if (bytes.empty()) return 0;
+    int64_t n = static_cast<int64_t>(std::count(bytes.begin(), bytes.end(), '\n'));
+    if (bytes.back() != '\n') ++n; // a final line with no trailing newline still counts
+    return n;
+}
+
+std::string generated_utc_now() {
+    std::time_t t = std::time(nullptr);
+    std::tm utc{};
+#if defined(_WIN32)
+    gmtime_s(&utc, &t);
+#else
+    gmtime_r(&t, &utc);
+#endif
+    std::ostringstream os;
+    os << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
+    return os.str();
+}
 } // namespace
 
-void write_report_json(const Engine& engine, const std::string& out_path) {
+void write_report_json(const Engine& engine, const std::string& out_path, const ReportProvenance& provenance) {
     const SummaryStats& s = engine.summary();
 
     json::Value summary = json::Value::make_object();
@@ -133,6 +171,38 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
     }
 
     json::Value root = json::Value::make_object();
+
+    // [C] Provenance -- omitted entirely when the caller passed none (the
+    // default), so a call site that doesn't know its own config/input paths
+    // (e.g. the C API's ddrt_write_report_json, which only holds an Engine)
+    // sees no change in its output.
+    if (!provenance.config_path.empty()) {
+        json::Value prov = json::Value::make_object();
+        prov.set("schema_version", "1.0");
+        prov.set("tool_version", kVersion);
+        prov.set("config_path", provenance.config_path);
+        prov.set("config_sha256", sha256_hex(read_file_bytes(provenance.config_path)));
+        json::Value inputs = json::Value::make_array();
+        for (const auto& path : provenance.input_paths) {
+            std::string bytes = read_file_bytes(path);
+            json::Value iv = json::Value::make_object();
+            iv.set("path", path);
+            iv.set("sha256", sha256_hex(bytes));
+            iv.set("lines", count_lines(bytes));
+            inputs.push_back(std::move(iv));
+        }
+        prov.set("inputs", std::move(inputs));
+        prov.set("generated_utc", generated_utc_now());
+        // This tool always reconstructs timing under maximum-eagerness
+        // issue (README "The core assumption") -- there is no other issue
+        // model yet, but naming it explicitly means a report never has to
+        // be silent about which assumption produced its issue_cycle values,
+        // and gives a stable place for a future model (e.g. one driven by
+        // an optional arrival_ns) to say so instead.
+        prov.set("issue_model", "eager");
+        root.set("provenance", std::move(prov));
+    }
+
     root.set("summary", std::move(summary));
     root.set("transactions", std::move(txns));
     root.set("core_burst_stats", std::move(core_burst));

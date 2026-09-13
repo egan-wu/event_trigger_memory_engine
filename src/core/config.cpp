@@ -1,4 +1,5 @@
 #include "config.hpp"
+#include "config_presets.hpp"
 #include "json.hpp"
 
 #include <stdexcept>
@@ -33,7 +34,11 @@ AddressField parse_field(const json::Value& obj, const std::string& key) {
 } // namespace
 
 DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
-    json::Value root = json::parse_file(path);
+    // [C] Expand "dram"/"address_mapping" preset shorthand before any of the
+    // normal field-by-field extraction below runs, so everything downstream
+    // (including validate()) sees a fully-expanded, plain topology/
+    // address_mapping/timing_ns tree either way -- see config_presets.hpp.
+    json::Value root = expand_presets(json::parse_file(path));
     DdrcConfig cfg;
 
     if (root.contains("topology")) {
@@ -58,6 +63,13 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.map_row = parse_field(m, "row");
     }
 
+    // [C] tRC is definitionally tRAS+tRP (a full activate-to-activate cycle
+    // for one bank); track whether the caller supplied it explicitly so a
+    // config that omits it gets the value that's actually consistent with
+    // whatever tRAS/tRP it DID supply, rather than always falling back to
+    // the struct default (45.75) regardless -- see below, after tRAS/tRP
+    // are both resolved.
+    bool trc_explicit = root.contains("timing_ns") && root["timing_ns"].contains("tRC");
     if (root.contains("timing_ns")) {
         const json::Value& tm = root["timing_ns"];
         cfg.tRCD = tm.get_num("tRCD", cfg.tRCD);
@@ -80,6 +92,10 @@ DdrcConfig DdrcConfig::load_from_file(const std::string& path) {
         cfg.rd_wr_turnaround = tm.get_num("rd_wr_turnaround", cfg.rd_wr_turnaround);
         cfg.wr_rd_turnaround = tm.get_num("wr_rd_turnaround", cfg.wr_rd_turnaround);
     }
+    // [C] Now that tRAS/tRP have taken on whatever the config (or a dram
+    // preset) actually gave them, an omitted tRC is filled in consistently
+    // rather than left at a struct default that may no longer match.
+    if (!trc_explicit) cfg.tRC = cfg.tRAS + cfg.tRP;
 
     if (root.contains("ddrc_resources")) {
         const json::Value& r = root["ddrc_resources"];
@@ -193,6 +209,10 @@ void DdrcConfig::validate() const {
     check_width(map_rank, "rank", ranks_per_channel, "topology.ranks_per_channel");
     check_width(map_bankgroup, "bankgroup", bankgroups, "topology.bankgroups");
     check_width(map_bank, "bank", banks_per_group, "topology.banks_per_group");
+    // [C] row was the one field this check never covered -- added alongside
+    // the preset system, which computes exactly this width for every field
+    // it generates and so is naturally never at risk of tripping it.
+    check_width(map_row, "row", rows, "topology.rows");
 
     // A physical bit driving two fields' *direct* bit-select (`bits`, the
     // gather list) can't be right: both fields would read the same wire, so

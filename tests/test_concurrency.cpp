@@ -23,7 +23,7 @@ DDRTEST(concurrent_pushes_from_multiple_threads_lose_nothing) {
         DDR_CHECK(f != nullptr);
         fputs(R"({
           "topology": {"channels": 2, "bankgroups": 2, "banks_per_group": 2,
-                        "rows": 65536, "data_bus_bytes": 8, "clock_mhz": 1600},
+                        "rows": 1024, "data_bus_bytes": 8, "clock_mhz": 1600},
           "address_mapping": {
             "bank": {"bit_start": 10, "bit_width": 1},
             "bankgroup": {"bit_start": 11, "bit_width": 1},

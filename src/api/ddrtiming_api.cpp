@@ -10,6 +10,7 @@
 #include "../core/engine.hpp"
 #include "../core/log_parser.hpp"
 #include "../core/report.hpp"
+#include "../core/version.hpp"
 
 namespace {
 thread_local std::string g_create_error;
@@ -336,4 +337,4 @@ const char* ddrt_last_error(ddrt_engine_t* engine) {
     return engine->last_error.c_str();
 }
 
-const char* ddrt_version(void) { return "0.4.0"; }
+const char* ddrt_version(void) { return ddrtiming::kVersion; }

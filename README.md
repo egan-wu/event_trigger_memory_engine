@@ -64,8 +64,13 @@ Smoke test:
 ## 3. Features
 
 - Event-driven DDRC command scheduler (FR-FCFS) over a full DDR4/5-class timing set: tRCD/tRP/tRAS/tRC, tCL/tCWL (CAS latency), tCCD_S/L, tRRD_S/L, tFAW, tWTR_S/L, tRTP/tWR, R↔W bus turnaround, periodic refresh (tREFI/tRFC)
-- Configurable address mapping: contiguous bit-fields or scattered bit-gather per field, with optional XOR-hash interleaving
+- Configurable address mapping: contiguous bit-fields or scattered bit-gather per field, with optional XOR-hash interleaving; five DRAM presets and three address-mapping presets turn a ~30-field config into a 6-field one when a hand-tuned setup isn't needed (§4.3)
+- A closed bus-time attribution budget — eight shares that sum to 100%, naming exactly where bandwidth is going instead of requiring a hypothesis (§5.1)
+- Selectable page policy (open/closed/timer-based auto-precharge) and write-batching (read-priority with amortized write drains) — the two DDRC scheduler behaviors every shipped controller has and this model previously didn't (§4.3)
 - Per-bank row-buffer tracking → page-hit / row-conflict / row-empty classification per DRAM command
+- Latency distribution (p50/p95/p99/max) and per-core completion-time stats (row status, outstanding-cap wait time) alongside the mean (§5.1, §5.6)
+- Parameter-sweep tool (`ddrtiming_sweep`, §4.5): Cartesian-products config overrides against one workload, one row per point
+- Report provenance: SHA-256 of the exact config/input bytes behind every `--out` report, so two reports can be checked as comparable before drawing a conclusion from comparing them (§5.7)
 - Per-core AXI burst-size distribution (mean + quartiles) — see whether one core's requests are systematically smaller than another's before blaming the DRAM scheduler for its throughput
 - Over-fetch accounting: logical bytes requested vs. physical burst-aligned bytes DRAM actually moved
 - Input-integrity check: flags address aliasing (trace regions that silently collapse onto the same physical DRAM locations — `high_address_regions`, §5.1)
@@ -82,14 +87,17 @@ Smoke test:
 
 ```
 ddrtiming_cli --config <ddrc_config.json> --log <core0.csv> [--log <core1.csv> ...] \
-    [--out <report.json>] [--windowed-csv <history.csv>]
-ddrtiming_cli --config <ddrc_config.json> --validate-only
+    [--out <report.json>] [--windowed-csv <history.csv>] [--print-config]
+ddrtiming_cli --config <ddrc_config.json> --validate-only [--print-config]
 ```
 
 Each `--log` is assigned `core_id` = its position (0, 1, 2, ...).
 `--windowed-csv` requires `"reporting": {"history_window_ns": N}` in the
-config. Exit code `0` on success, `1` on any error (config/log/IO) — the
-message goes to stderr.
+config. `--print-config` expands any `"dram"`/`"address_mapping"` preset
+(§4.3) and prints the fully effective config as JSON — combine with
+`--validate-only` for a free check of what a preset actually expands to.
+Exit code `0` on success, `1` on any error (config/log/IO) — the message
+goes to stderr.
 
 ### 4.2 AXI log format (CSV)
 
@@ -122,7 +130,56 @@ hit/conflict/empty classifications (§5.2).
 ### 4.3 DDRC config (JSON)
 
 See `examples/ddrc_config.example.json`. Every field has a default (below);
-only override what you need.
+only override what you need — or start from `examples/ddrc_config.minimal.json`
+(6 fields total) and let the two presets below fill in the rest.
+
+#### Presets: a 6-field config instead of 30
+
+A DRAM device's full AC timing table and a hand-placed address map are
+real, physical facts about a part and a mapping style — not something worth
+retyping per experiment. Two independent, optional presets expand into the
+normal fields above, and every field they'd set can still be overridden
+individually (an explicit value always wins over the preset's):
+
+```json
+{
+  "dram": { "preset": "DDR4-3200", "channels": 2 },
+  "address_mapping": { "preset": "bankgroup-fast" }
+}
+```
+
+`"dram": {"preset": "<name>", ...}` fills `topology.{bankgroups,
+banks_per_group, rows, columns, data_bus_bytes, burst_beats, clock_mhz}` and
+every `timing_ns.*` field from a named, JEDEC-typical parameter set (`src/core/config_presets.cpp`
+carries each one's source note — these are typical values for the class of
+part, not one vendor's exact datasheet). `channels`/`ranks_per_channel` are
+topology choices, not DRAM-device properties, so no preset touches them —
+default `1` unless given; the `dram` object may carry them (or any other
+`topology.*` field) as a convenience shortcut, as `channels` does above.
+
+| preset | topology | notes |
+|---|---|---|
+| `DDR4-2400` | 4 bg × 4 banks | CL16-16-16 grade |
+| `DDR4-3200` | 4 bg × 4 banks | CL22-22-22 grade; matches `examples/ddrc_config.example.json`'s hand-written values |
+| `DDR5-4800` | 8 bg × 4 banks, BL16 | sub-channels not modeled — treated as one 64-bit channel |
+| `LPDDR4-4266` | no bank groups, 8 banks, BL16 | `data_bus_bytes=4` (x32) |
+| `LPDDR5-6400` | 4 bg × 4 banks, BL16 | `data_bus_bytes=2` (x16) |
+
+`"address_mapping": {"preset": "<name>", ...per-field overrides}` expands
+to `{"bit_start","bit_width"}` for `channel`/`rank`/`bankgroup`/`bank`/`row`,
+computed from the (by-then-expanded) topology: each field's width is
+`⌈log2(count)⌉`, and `row` is always last and widest. An explicit field
+already written (e.g. a hand-placed `"row"`) wins over the preset for that
+field only.
+
+| preset | field order (fastest-changing first) | use it for |
+|---|---|---|
+| `bankgroup-fast` | bankgroup, bank, channel, rank, [column remainder], row | a single stream that should rotate bank groups every command (§5.1 `tccd_l_excess_pct`) |
+| `channel-low` | channel, bankgroup, bank, rank, [column remainder], row | spreading consecutive bursts across channels first |
+| `bank-per-core` | bankgroup, channel, [column remainder], bank, rank, row | isolating concurrent large per-core buffers onto disjoint banks (§6's core-isolation pattern) |
+
+`--print-config` (§4.1) shows exactly what either preset expands to for your
+own topology — check it once rather than hand-deriving the bit arithmetic.
 
 | section | field(s) | default | meaning |
 |---|---|---|---|
@@ -132,7 +189,7 @@ only override what you need.
 | | `burst_beats` | `8` | beats per minimum DRAM access (BL8=8, BC4=4) — drives over-fetch accounting |
 | | `clock_mhz` | `1600` | **effective transfer rate in MT/s** (e.g. `3200` for DDR4-3200) — not the DRAM core clock |
 | `address_mapping` | `channel`, `rank`, `bankgroup`, `bank`, `row` | unset field = always 0 | `{"bit_start": N, "bit_width": W}` (contiguous) or `{"bits": [b0, b1, ...]}` (scattered, LSB-first); optional `"hash_bits": [...]` XORs each gathered bit against another physical bit. Unmapped low bits are the implicit column/byte offset. Which field is fastest-changing affects `bankgroup_reuse_rate_pct`, §5.1. |
-| `timing_ns` | `tRCD tRP tRAS tRC tCL tCWL tCCD_S/L tRRD_S/L tFAW tWTR_S/L tRTP tWR tREFI tRFC rd_wr_turnaround wr_rd_turnaround` | see `src/core/config.hpp` | all nanoseconds; `_S` = different bank group, `_L` = same bank group |
+| `timing_ns` | `tRCD tRP tRAS tRC tCL tCWL tCCD_S/L tRRD_S/L tFAW tWTR_S/L tRTP tWR tREFI tRFC rd_wr_turnaround wr_rd_turnaround` | see `src/core/config.hpp` | all nanoseconds; `_S` = different bank group, `_L` = same bank group. `tRC` specifically: if omitted, it's set to `tRAS + tRP` (its own definition) rather than a fixed default, so it can never silently disagree with whatever `tRAS`/`tRP` you did supply |
 | `ddrc_resources` | `command_queue_depth` | `32` | per-channel queue depth (backpressure bound) |
 | | `max_outstanding_per_id` | `16` | cap per `(core_id, axi_id)` stream, not per core |
 | | `scheduling_policy` | `"fr_fcfs"` | only accepted value |
@@ -146,8 +203,12 @@ only override what you need.
 
 `DdrcConfig::validate()` (run automatically on load, or standalone via
 `--validate-only`) rejects physically impossible configs — bit overlaps,
-non-power-of-two topology counts, inverted timing relationships (e.g.
-`tRC < tRAS + tRP`), unsupported enum values — naming the offending field.
+non-power-of-two topology counts, a mapped field's width not matching its
+topology count (checked for every field, `row` included), inverted timing
+relationships (e.g. `tRC < tRAS + tRP`), unsupported enum values — naming
+the offending field. It runs on the fully preset-expanded config, so a
+preset that happened to produce something inconsistent would be caught the
+same way a hand-written config would be.
 
 ### 4.4 C API
 
@@ -282,8 +343,9 @@ error -- those exit `1` before any point runs; a sweep where every point ran
 Three ways to read the same underlying fields: the CLI's plain-text summary
 (printed to stdout on every run — human-oriented, not meant to be parsed;
 see §5.0), JSON (`ddrt_write_report_json` / CLI `--out`, shape
-`{"summary": {...}, "transactions": [...], "core_burst_stats": [...], "core_runtime_stats": [...], "windows": [...]}`,
-`"windows"` present only when windowing is enabled), or the C API's typed
+`{"provenance": {...}, "summary": {...}, "transactions": [...], "core_burst_stats": [...], "core_runtime_stats": [...], "windows": [...]}`,
+`"provenance"` present only from the CLI (§5.7), `"windows"` only when
+windowing is enabled), or the C API's typed
 structs (`ddrt_get_summary` / `ddrt_get_result_at` / `ddrt_get_core_burst_stats_at`
 / `ddrt_get_core_runtime_stats_at` / `ddrt_get_window_at`). `summary()` is
 always cumulative since the engine was created, regardless of what
@@ -551,6 +613,48 @@ not DRAM-limited, and the fix is raising `max_outstanding_per_id` (or, if
 it's already generous, the core's own request pattern) rather than
 touching the address map or scheduler policy.
 
+### 5.7 Provenance (JSON `"provenance"`, CLI `--out` only)
+
+The one thing every other section of this spec assumes: that when you're
+comparing two reports, they actually came from the same config and inputs.
+Nothing above can tell you that on its own — this can:
+
+```json
+"provenance": {
+  "schema_version": "1.0", "tool_version": "0.4.0",
+  "config_path": "bench/llama_decode_4c/config.json",
+  "config_sha256": "c2c5666e...",
+  "inputs": [ {"path": "bench/llama_decode_4c/core0.csv", "sha256": "1c85f7a2...", "lines": 1041} ],
+  "generated_utc": "2026-09-13T05:07:32Z",
+  "issue_model": "eager"
+}
+```
+
+| field | meaning |
+|---|---|
+| `schema_version` | version of this provenance block's own shape (not the tool) |
+| `tool_version` | `ddrt_version()` — the exact library build that produced this report |
+| `config_path`, `config_sha256` | the `--config` path as given, and a SHA-256 of its exact bytes |
+| `inputs[]` | one entry per `--log`, in the order given: `path`, `sha256` (exact bytes), `lines` (newline count — includes the header and any `BARRIER` rows) |
+| `generated_utc` | wall-clock time the report was written, ISO-8601 UTC |
+| `issue_model` | always `"eager"` today (§1) — a named, stable place for a future timestamp-driven issue model to say so instead, so a report is never silently ambiguous about which assumption produced its `issue_cycle` values |
+
+The practical use: before treating two reports as comparable (a sweep
+baseline, a before/after check), compare `config_sha256` — a match means
+the same config bytes produced both, a mismatch means don't. This is
+specifically the failure mode that produces a false conclusion silently: a
+stale or mismatched intermediate file that still parses and runs cleanly,
+just against the wrong input. `config_sha256` matching is a necessary
+check, not a sufficient one for "the run itself is comparable" (e.g. two
+configs can differ only in `ddrc_resources.command_queue_depth` and still
+be a deliberate, valid comparison) — it rules out the accidental case, which
+is the one a hash can actually catch.
+
+Only the CLI's `--out` populates this (it's the one call site that already
+holds the config/log paths); `ddrt_write_report_json()` takes an optional
+`ReportProvenance{config_path, input_paths}` (empty by default, meaning no
+provenance is written) for a caller in the same position.
+
 ## 6. Skill Guide for AI Agents
 
 The tool's own design principle carries over to how an agent should use it:
@@ -568,6 +672,7 @@ cutoff.
 4. For anything beyond a single number — trends, outliers, before/after — don't parse `history.csv` directly: run `windowed_history_analyze --csv history.csv [--baseline other.csv] --out analysis.json` (§5.4) and read that. Its output size is bounded regardless of trace length, and `extremes` hands you the exact window to go inspect instead of you having to scan for it.
 5. Check `summary.high_address_regions` before trusting any hit/conflict/bandwidth number from step 3 — `>1` means the input trace itself aliases onto overlapping DRAM locations, and every other field describes a workload that doesn't exist (§5.1).
 6. Before spending effort optimizing a config, check `summary.headroom_pct` (§5.1) — a run already within a percentage point or two of `ceiling_refresh_pct` has essentially nothing left to gain from address-mapping or scheduler-policy changes; the remaining gap belongs to the refresh interval itself.
+7. Before treating two reports as a valid before/after comparison, compare `provenance.config_sha256` (§5.7) — a mismatch means at least one side changed in a way you may not have intended, and any conclusion drawn from comparing them is unreliable until you know why.
 
 **Start with `summary.bus_time_attribution` (§5.1).** It partitions the
 run's channel-time into eight shares that sum to 100%, so the largest

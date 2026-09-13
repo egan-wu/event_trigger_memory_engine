@@ -4,19 +4,41 @@
 #include <vector>
 
 #include "../core/config.hpp"
+#include "../core/config_presets.hpp"
 #include "../core/engine.hpp"
+#include "../core/json.hpp"
 #include "../core/log_parser.hpp"
 #include "../core/report.hpp"
 
 namespace {
 void print_usage() {
     std::cout << "Usage: ddrtiming_cli --config <ddrc_config.json> --log <core0_axi.csv> "
-                 "[--log <core1_axi.csv> ...] [--out <report.json>] [--windowed-csv <history.csv>]\n"
+                 "[--log <core1_axi.csv> ...] [--out <report.json>] [--windowed-csv <history.csv>] "
+                 "[--print-config]\n"
                  "       ddrtiming_cli --config <ddrc_config.json> --validate-only\n"
                  "Each --log is assigned core_id = its position (0, 1, 2, ...).\n"
                  "--windowed-csv requires \"reporting\": {\"history_window_ns\": N} in the config.\n"
                  "--validate-only loads and validates the config, then exits without --log or "
-                 "running a simulation -- useful for quickly checking a config is well-formed.\n";
+                 "running a simulation -- useful for quickly checking a config is well-formed.\n"
+                 "--print-config expands any \"dram\"/\"address_mapping\" preset (see README S4.3) and "
+                 "prints the fully effective config as JSON; combine with --validate-only for a "
+                 "free check of what a preset actually expands to, or use alone to also run the "
+                 "simulation afterward.\n";
+}
+
+// [C] Parses and preset-expands config_path, printing the result as JSON --
+// shared by --print-config and --validate-only (which also prints it, so a
+// preset's expansion is visible on the same free check that catches a
+// malformed config). Exits the process on a parse/preset error, matching
+// the other config-loading error paths in this file.
+void print_expanded_config(const std::string& config_path) {
+    try {
+        ddrtiming::json::Value expanded = ddrtiming::expand_presets(ddrtiming::json::parse_file(config_path));
+        std::cout << expanded.dump(2) << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        std::exit(1);
+    }
 }
 } // namespace
 
@@ -26,6 +48,7 @@ int main(int argc, char** argv) {
     std::string out_path;
     std::string windowed_csv_path;
     bool validate_only = false;
+    bool print_config = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -41,6 +64,7 @@ int main(int argc, char** argv) {
         else if (arg == "--out") out_path = need_value("--out");
         else if (arg == "--windowed-csv") windowed_csv_path = need_value("--windowed-csv");
         else if (arg == "--validate-only") validate_only = true;
+        else if (arg == "--print-config") print_config = true;
         else if (arg == "--help" || arg == "-h") { print_usage(); return 0; }
         else { std::cerr << "unknown argument: " << arg << "\n"; print_usage(); return 1; }
     }
@@ -51,6 +75,7 @@ int main(int argc, char** argv) {
     }
 
     if (validate_only) {
+        if (print_config) print_expanded_config(config_path);
         try {
             ddrtiming::DdrcConfig cfg = ddrtiming::DdrcConfig::load_from_file(config_path);
             (void)cfg;
@@ -61,6 +86,8 @@ int main(int argc, char** argv) {
         std::cout << "OK: " << config_path << " is a valid configuration\n";
         return 0;
     }
+
+    if (print_config) print_expanded_config(config_path);
 
     try {
         ddrtiming::DdrcConfig cfg = ddrtiming::DdrcConfig::load_from_file(config_path);
@@ -95,7 +122,10 @@ int main(int argc, char** argv) {
         }
 
         if (!out_path.empty()) {
-            ddrtiming::write_report_json(engine, out_path);
+            ddrtiming::ReportProvenance provenance;
+            provenance.config_path = config_path;
+            provenance.input_paths = log_paths;
+            ddrtiming::write_report_json(engine, out_path, provenance);
             std::cout << "\nJSON report written to " << out_path << "\n";
         }
         if (!windowed_csv_path.empty()) {

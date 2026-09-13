@@ -18,6 +18,8 @@ endif()
 set(CORE_SOURCES
     src/core/json.cpp
     src/core/config.cpp
+    src/core/config_presets.cpp
+    src/core/sha256.cpp
     src/core/address_decoder.cpp
     src/core/command_queue.cpp
     src/core/engine.cpp
@@ -52,6 +54,7 @@ add_executable(ddrtiming_tests
     tests/test_concurrency.cpp
     tests/test_config_validation.cpp
     tests/test_attribution.cpp
+    tests/test_config_presets.cpp
 )
 target_include_directories(ddrtiming_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src ${CMAKE_CURRENT_SOURCE_DIR}/tests)
 find_package(Threads REQUIRED)
@@ -97,3 +100,13 @@ add_test(NAME ddrtiming_sweep_smoke
 set_tests_properties(ddrtiming_sweep_smoke PROPERTIES
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
     PASS_REGULAR_EXPRESSION "bankgroup_reuse_rate_pct")
+
+# examples/ddrc_config.minimal.json (README S4.3): a config expressed
+# entirely through the "dram"/"address_mapping" presets must still be a
+# valid, loadable config -- this is the free check that a preset's
+# expansion is self-consistent, run every time the suite runs.
+add_test(NAME minimal_preset_config_validates
+         COMMAND ddrtiming_cli --config ${CMAKE_CURRENT_SOURCE_DIR}/examples/ddrc_config.minimal.json
+                 --validate-only)
+set_tests_properties(minimal_preset_config_validates PROPERTIES
+    PASS_REGULAR_EXPRESSION "is a valid configuration")
