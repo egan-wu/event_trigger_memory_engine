@@ -396,19 +396,40 @@ IDs can complete out of order relative to each other.
 
 ### 5.3 Windowed history (`ddrt_window_stats_t`, JSON `"windows"[]`)
 
-Requires `"reporting": {"history_window_ns": N}` (§4.3). Every dispatched
-transaction is bucketed by its `issue_cycle` into a fixed-`N`-ns window,
-accumulated incrementally — unaffected by `prune_results_before()`, same as
-`summary()`.
+Requires `"reporting": {"history_window_ns": N}` (§4.3). Each fixed-`N`-ns
+window is filled from two different points in a transaction's life —
+accumulated incrementally either way, unaffected by `prune_results_before()`,
+same as `summary()`:
+
+- `bytes_read`/`bytes_written`/`dram_bytes`/`txn_count`/`hits`/`conflicts`/
+  `empties`/`bankgroup_reuse_count`/`active_bank_count` (**delivered**) land
+  in the window containing the transaction's own **completion** — what that
+  window's bus actually transferred. A transaction longer than one window is
+  not split; the whole transfer counts in its completion window.
+- `offered_bytes`/`offered_txn_count`/`offered_bandwidth_gbps` (**offered**)
+  and `outstanding_high_water`/`outstanding_occupancy_pct` land in the window
+  containing the transaction's **issue** — "how much was requested" and
+  front-end queue occupancy, both front-end-clock quantities by definition.
+
+These can be, and often are, different windows: with a deep outstanding
+queue a burst of transactions issues all at once but delivers over many
+later windows, so `offered_bandwidth_gbps` in one window and
+`avg_bandwidth_gbps` several windows later can both be real and consistent.
+Bucketing delivered bytes by issue instead of completion — the behavior
+before this was fixed — let a window's reported bandwidth exceed
+`peak_bandwidth_gbps`, a physical impossibility; if you're comparing against
+an older report, prefer `offered_bandwidth_gbps` there for the closest
+equivalent to what it called `avg_bandwidth_gbps`.
 
 | field | meaning |
 |---|---|
 | `window_index`, `start_ns`, `duration_ns` | which window, and its time span |
-| `bytes_read`, `bytes_written`, `dram_bytes`, `txn_count` | traffic in this window |
-| `hits`, `conflicts`, `empties` | row-status classification in this window |
-| `avg_bandwidth_gbps` | `(bytes_read + bytes_written) / duration_ns` |
-| `outstanding_high_water` / `outstanding_occupancy_pct` | peak, across every `(core, axi_id)` stream active in the window, of that stream's outstanding-request count vs. `max_outstanding_per_id`. Pinned near 100% means the outstanding cap, not DRAM, is capping throughput there. |
-| `active_bank_count` / `bank_utilization_pct` | distinct physical banks touched at least once in the window, out of the topology's total. Low means traffic is landing on only a handful of banks — an address-mapping spread problem, not a timing one. |
+| `bytes_read`, `bytes_written`, `dram_bytes`, `txn_count` | delivered traffic in this window (by completion) |
+| `hits`, `conflicts`, `empties` | row-status classification of transactions delivered in this window |
+| `avg_bandwidth_gbps` | `(bytes_read + bytes_written) / duration_ns` — delivered bandwidth |
+| `offered_bytes`, `offered_txn_count`, `offered_bandwidth_gbps` | the issue-indexed counterpart: what was requested in this window, regardless of when it finished |
+| `outstanding_high_water` / `outstanding_occupancy_pct` | peak, across every `(core, axi_id)` stream active in the window (by issue), of that stream's outstanding-request count vs. `max_outstanding_per_id`. Pinned near 100% means the outstanding cap, not DRAM, is capping throughput there. |
+| `active_bank_count` / `bank_utilization_pct` | distinct physical banks touched by a transaction delivered in the window, out of the topology's total. Low means traffic is landing on only a handful of banks — an address-mapping spread problem, not a timing one. |
 
 `ddrt_get_window_channel_stats(e, window_index, channel_index, &out)`
 (fields: `dram_bytes`, `avg_bandwidth_gbps`, `utilization_pct`) gives the
@@ -423,9 +444,10 @@ only, not yet added to the `ddrt_window_stats_t` C struct.
 
 CSV column order (`--windowed-csv`): `window_index, start_ns, bytes_read,
 bytes_written, dram_bytes, txn_count, hits, conflicts, empties,
-bankgroup_reuse_count, avg_bandwidth_gbps, outstanding_high_water,
-outstanding_occupancy_pct, active_bank_count, bank_utilization_pct`, then
-`ch{N}_dram_bytes, ch{N}_avg_bandwidth_gbps` per channel.
+bankgroup_reuse_count, avg_bandwidth_gbps, offered_bytes, offered_txn_count,
+offered_bandwidth_gbps, outstanding_high_water, outstanding_occupancy_pct,
+active_bank_count, bank_utilization_pct`, then `ch{N}_dram_bytes,
+ch{N}_avg_bandwidth_gbps` per channel.
 
 View it with `tools/windowed_history_viewer.html` (open directly, `file://`,
 no server/build) — synchronized-hover charts for every field above,

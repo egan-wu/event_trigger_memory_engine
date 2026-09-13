@@ -20,6 +20,6 @@
   "high_address_regions": 1,
   "windowed.window_count": 100,
   "windowed.avg_bandwidth_gbps_mean": 1.32414,
-  "windowed.avg_bandwidth_gbps_min": 0.110345,
-  "windowed.avg_bandwidth_gbps_max": 1.5669
+  "windowed.avg_bandwidth_gbps_min": 0.286897,
+  "windowed.avg_bandwidth_gbps_max": 1.41241
 }

@@ -101,11 +101,15 @@ typedef struct {
 } ddrt_summary_t;
 
 /* One fixed-size bucket of simulated time (topology.history_window_ns in the
- * config; disabled if that's 0 or unset). Accumulated incrementally at
- * dispatch time -- like ddrt_summary_t, unaffected by
- * ddrt_prune_results_before() -- so you can build a bandwidth/byte-access
- * history independent of how often you happen to call ddrt_run() or drain
- * results. See README "Windowed history". */
+ * config; disabled if that's 0 or unset). Accumulated incrementally --
+ * bytes_read/bytes_written/dram_bytes/txn_count/hits/conflicts/empties are
+ * indexed by each transaction's own COMPLETION cycle (what this window's bus
+ * actually delivered); offered_bytes/offered_txn_count below are the
+ * ISSUE-indexed counterpart, and outstanding_high_water stays issue-indexed
+ * too (occupancy is a front-end-queue quantity). Like ddrt_summary_t,
+ * unaffected by ddrt_prune_results_before() -- so you can build a
+ * bandwidth/byte-access history independent of how often you happen to call
+ * ddrt_run() or drain results. See README "Windowed history". */
 typedef struct {
     uint64_t window_index;
     double start_ns;
@@ -134,6 +138,12 @@ typedef struct {
      * address-mapping spread problem, not a timing one). */
     uint64_t active_bank_count;
     double bank_utilization_pct; /* active_bank_count / total_banks * 100 */
+    /* [F] Issue-indexed counterpart to bytes_read/bytes_written/txn_count
+     * above -- "how much was requested in this window" rather than "how
+     * much this window's bus delivered". See this struct's own comment. */
+    uint64_t offered_bytes;
+    uint64_t offered_txn_count;
+    double offered_bandwidth_gbps; /* offered_bytes / duration_ns */
 } ddrt_window_stats_t;
 
 /* Distribution of AXI burst sizes (logical bytes requested per transaction,

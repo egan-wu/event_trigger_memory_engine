@@ -21,5 +21,5 @@
   "windowed.window_count": 84,
   "windowed.avg_bandwidth_gbps_mean": 12.1905,
   "windowed.avg_bandwidth_gbps_min": 3.584,
-  "windowed.avg_bandwidth_gbps_max": 16.128
+  "windowed.avg_bandwidth_gbps_max": 12.8
 }

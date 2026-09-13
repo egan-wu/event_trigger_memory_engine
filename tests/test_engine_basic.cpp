@@ -311,7 +311,13 @@ DDRTEST(windowed_history_disabled_by_default) {
     DDR_CHECK_EQ(engine.windows().size(), static_cast<size_t>(0));
 }
 
-DDRTEST(windowed_history_buckets_by_issue_cycle_and_survives_pruning) {
+// [F] Delivered fields (bytes_read/txn_count/hits/empties/...) bucket by
+// completion, not issue -- txn1 issues at 0 but doesn't complete until 13,
+// which lands in a LATER window than its own issue. offered_bytes/
+// offered_txn_count are the issue-indexed counterpart, kept precisely so a
+// caller can still ask "when was this requested" separately from "when did
+// it land". See WindowStats's class comment.
+DDRTEST(windowed_history_delivered_buckets_by_completion_offered_by_issue) {
     DdrcConfig cfg = make_test_config();
     cfg.history_window_ns = 10.0; // == 10 cycles exactly (1 ns/cycle in this config)
     Engine engine(cfg);
@@ -325,19 +331,35 @@ DDRTEST(windowed_history_buckets_by_issue_cycle_and_survives_pruning) {
     const auto& r = engine.results();
     DDR_CHECK_EQ(r.size(), static_cast<size_t>(2));
     DDR_CHECK_EQ(r[0].issue_cycle, 0ull);
+    DDR_CHECK_EQ(r[0].complete_cycle, 13ull);
     DDR_CHECK_EQ(r[1].issue_cycle, 13ull);
+    DDR_CHECK_EQ(r[1].complete_cycle, 21ull);
 
+    // txn1: issue window 0/10=0, complete window 13/10=1.
+    // txn2: issue window 13/10=1, complete window 21/10=2.
     const auto& w = engine.windows();
-    DDR_CHECK(w.size() >= 2); // window 0 (cycles 0-9) and window 1 (cycles 10-19)
+    DDR_CHECK(w.size() >= 3); // windows 0 (cycles 0-9), 1 (10-19), 2 (20-29)
 
-    DDR_CHECK_EQ(w[0].bytes_read, 64ull);
-    DDR_CHECK_EQ(w[0].txn_count, 1ull);
-    DDR_CHECK_EQ(w[0].empties, 1ull);
-    DDR_CHECK_EQ(w[0].hits, 0ull);
+    // Window 0: txn1 was OFFERED here, but delivers nothing yet.
+    DDR_CHECK_EQ(w[0].offered_bytes, 64ull);
+    DDR_CHECK_EQ(w[0].offered_txn_count, 1ull);
+    DDR_CHECK_EQ(w[0].bytes_read, 0ull);
+    DDR_CHECK_EQ(w[0].txn_count, 0ull);
 
+    // Window 1: txn1 DELIVERS here (its completion), and txn2 is OFFERED here.
     DDR_CHECK_EQ(w[1].bytes_read, 64ull);
     DDR_CHECK_EQ(w[1].txn_count, 1ull);
-    DDR_CHECK_EQ(w[1].hits, 1ull);
+    DDR_CHECK_EQ(w[1].empties, 1ull);
+    DDR_CHECK_EQ(w[1].hits, 0ull);
+    DDR_CHECK_EQ(w[1].offered_bytes, 64ull);
+    DDR_CHECK_EQ(w[1].offered_txn_count, 1ull);
+
+    // Window 2: txn2 DELIVERS here; nothing offered.
+    DDR_CHECK_EQ(w[2].bytes_read, 64ull);
+    DDR_CHECK_EQ(w[2].txn_count, 1ull);
+    DDR_CHECK_EQ(w[2].hits, 1ull);
+    DDR_CHECK_EQ(w[2].offered_bytes, 0ull);
+    DDR_CHECK_EQ(w[2].offered_txn_count, 0ull);
 
     size_t window_count_before_prune = w.size();
     uint64_t max_id = 0;
@@ -347,8 +369,8 @@ DDRTEST(windowed_history_buckets_by_issue_cycle_and_survives_pruning) {
     DDR_CHECK_EQ(engine.results().size(), static_cast<size_t>(0));
     // Windows are tracked independently of results(), same as summary().
     DDR_CHECK_EQ(engine.windows().size(), window_count_before_prune);
-    DDR_CHECK_EQ(engine.windows()[0].bytes_read, 64ull);
     DDR_CHECK_EQ(engine.windows()[1].bytes_read, 64ull);
+    DDR_CHECK_EQ(engine.windows()[2].bytes_read, 64ull);
 }
 
 DDRTEST(windowed_history_tracks_outstanding_high_water_and_active_banks) {

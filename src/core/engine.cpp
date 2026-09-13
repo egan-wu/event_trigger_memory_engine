@@ -184,9 +184,11 @@ void Engine::route_completed_chunk(const DramCommand& done) {
         case RowStatus::Empty: ip.empties++; break;
     }
 
-    if (ip.has_window) {
-        WindowStats& w = windows_[ip.window_index];
-        if (done.bankgroup_reuse) w.bankgroup_reuse_count++;
+    // [F] Accumulate into this transaction's own totals rather than
+    // windows_[] directly -- which window this belongs to isn't knowable
+    // until the whole transaction completes (see WindowStats's comment).
+    if (history_window_cycles_ > 0) {
+        if (done.bankgroup_reuse) ip.win_bankgroup_reuse++;
         uint32_t ch = done.addr.channel % static_cast<uint32_t>(channels_.size());
         // Same modulo reduction ChannelScheduler itself uses to index
         // banks_[], so this counts actual physical banks, not raw (possibly
@@ -197,10 +199,10 @@ void Engine::route_completed_chunk(const DramCommand& done) {
         uint64_t bank_key = ((static_cast<uint64_t>(ch) * static_cast<uint64_t>(std::max(1, cfg_.ranks_per_channel)) + rank_idx) *
                                   static_cast<uint64_t>(std::max(1, cfg_.bankgroups)) + bg_idx) *
                                  static_cast<uint64_t>(std::max(1, cfg_.banks_per_group)) + bank_idx;
-        w.active_banks.insert(bank_key);
+        ip.win_active_banks.insert(bank_key);
 
-        if (w.dram_bytes_per_channel.size() <= ch) w.dram_bytes_per_channel.resize(ch + 1, 0);
-        w.dram_bytes_per_channel[ch] += done.bytes;
+        if (ip.win_dram_bytes_per_channel.size() <= ch) ip.win_dram_bytes_per_channel.resize(ch + 1, 0);
+        ip.win_dram_bytes_per_channel[ch] += done.bytes;
     }
 
     ip.chunks_dispatched++;
@@ -271,16 +273,35 @@ void Engine::finalize_in_progress_txn(int core_id, int segment_idx, uint32_t axi
         acc.outstanding_wait_sum_ns += static_cast<double>(ip.outstanding_wait_cycles) * cfg_.clock_period_ns();
     }
 
-    if (ip.has_window) {
-        WindowStats& w = windows_[ip.window_index];
-        if (res.type == TxnType::Read) w.bytes_read += res.bytes;
-        else w.bytes_written += res.bytes;
-        w.dram_bytes += res.dram_bytes;
-        w.txn_count++;
-        w.hits += res.hits;
-        w.conflicts += res.conflicts;
-        w.empties += res.empties;
-        w.max_outstanding_count = std::max(w.max_outstanding_count, static_cast<uint64_t>(idc.outstanding.size()));
+    // [F] Windowed history: "delivered" fields go to the window containing
+    // this transaction's own completion; "offered" + occupancy stay
+    // issue-indexed -- see WindowStats's class comment for why these are
+    // now two different windows in general, not one.
+    if (history_window_cycles_ > 0) {
+        size_t complete_window = static_cast<size_t>(complete / history_window_cycles_);
+        size_t issue_window = static_cast<size_t>(ip.issue_cycle / history_window_cycles_);
+        size_t needed = std::max(complete_window, issue_window);
+        if (windows_.size() <= needed) windows_.resize(needed + 1);
+
+        WindowStats& dw = windows_[complete_window];
+        if (res.type == TxnType::Read) dw.bytes_read += res.bytes;
+        else dw.bytes_written += res.bytes;
+        dw.dram_bytes += res.dram_bytes;
+        dw.txn_count++;
+        dw.hits += res.hits;
+        dw.conflicts += res.conflicts;
+        dw.empties += res.empties;
+        dw.bankgroup_reuse_count += ip.win_bankgroup_reuse;
+        for (uint64_t bank_key : ip.win_active_banks) dw.active_banks.insert(bank_key);
+        for (size_t ch = 0; ch < ip.win_dram_bytes_per_channel.size(); ++ch) {
+            if (dw.dram_bytes_per_channel.size() <= ch) dw.dram_bytes_per_channel.resize(ch + 1, 0);
+            dw.dram_bytes_per_channel[ch] += ip.win_dram_bytes_per_channel[ch];
+        }
+
+        WindowStats& ow = windows_[issue_window];
+        ow.offered_bytes += res.bytes;
+        ow.offered_txn_count++;
+        ow.max_outstanding_count = std::max(ow.max_outstanding_count, static_cast<uint64_t>(idc.outstanding.size()));
     }
 
     idc.pending.pop_front();
@@ -410,13 +431,6 @@ void Engine::run() {
             {
                 uint64_t other_floor = std::max(port_free, seg.gate_cycle);
                 ip.outstanding_wait_cycles = (id_gate > other_floor) ? (id_gate - other_floor) : 0;
-            }
-
-            if (history_window_cycles_ > 0) {
-                size_t window_index = static_cast<size_t>(issue_cycle / history_window_cycles_);
-                if (windows_.size() <= window_index) windows_.resize(window_index + 1);
-                ip.has_window = true;
-                ip.window_index = window_index;
             }
 
             // Front-end port advance happens at admission, decoupled from

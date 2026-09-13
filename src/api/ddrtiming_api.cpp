@@ -229,6 +229,11 @@ int ddrt_get_window_at(ddrt_engine_t* engine, uint64_t index, ddrt_window_stats_
     out->outstanding_occupancy_pct = static_cast<double>(w.max_outstanding_count) / max_out * 100.0;
     out->active_bank_count = w.active_banks.size();
     out->bank_utilization_pct = static_cast<double>(w.active_banks.size()) / cfg.total_banks() * 100.0;
+    out->offered_bytes = w.offered_bytes;
+    out->offered_txn_count = w.offered_txn_count;
+    out->offered_bandwidth_gbps = (out->duration_ns > 0.0)
+        ? static_cast<double>(w.offered_bytes) / out->duration_ns
+        : 0.0;
     return 0;
 }
 

@@ -18,8 +18,8 @@
   "bankgroup_reuse_rate_pct": 99.9833,
   "mapped_address_bits": 31,
   "high_address_regions": 1,
-  "windowed.window_count": 94,
-  "windowed.avg_bandwidth_gbps_mean": 1.3617,
-  "windowed.avg_bandwidth_gbps_min": 0,
-  "windowed.avg_bandwidth_gbps_max": 3.2
+  "windowed.window_count": 96,
+  "windowed.avg_bandwidth_gbps_mean": 1.33333,
+  "windowed.avg_bandwidth_gbps_min": 1.216,
+  "windowed.avg_bandwidth_gbps_max": 1.408
 }

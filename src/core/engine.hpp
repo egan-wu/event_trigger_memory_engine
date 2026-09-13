@@ -160,12 +160,27 @@ struct CoreRuntimeStats {
     double outstanding_wait_avg_ns = 0.0;
 };
 
-// One fixed-size bucket of simulated time (history_window_ns in the config),
-// indexed by a transaction's issue_cycle. Accumulated incrementally at
-// dispatch time -- like SummaryStats, unaffected by prune_results_before()
-// -- so a caller can build a bandwidth/byte-access history independent of
-// how often it happens to call run() or drain/prune results(). See README
-// "Windowed history".
+// One fixed-size bucket of simulated time (history_window_ns in the config).
+// Accumulated incrementally at completion time -- like SummaryStats,
+// unaffected by prune_results_before() -- so a caller can build a
+// bandwidth/byte-access history independent of how often it happens to call
+// run() or drain/prune results(). See README "Windowed history".
+//
+// [F] bytes_read/bytes_written/dram_bytes/txn_count/hits/conflicts/empties/
+// bankgroup_reuse_count/active_banks/dram_bytes_per_channel are indexed by
+// each transaction's (completion-clamped) complete_cycle -- what this
+// window's bus actually delivered -- NOT issue_cycle. They used to be
+// issue-indexed, which front-loaded the whole series under a deep
+// outstanding queue badly enough that a window's bandwidth could exceed
+// peak_bandwidth_gbps, a physical impossibility (see bench/README.md's
+// known-limitations history for where this was first flagged). A
+// transaction longer than one window is not split -- the whole transfer
+// lands in the window containing its completion, same simplification the
+// old code made for issue_cycle. offered_bytes/offered_txn_count below are
+// the (still issue-indexed) counterpart for when the front-end request
+// rate itself is what's being examined; max_outstanding_count also stays
+// issue-indexed, since occupancy is a front-end-queue quantity by
+// definition, not something a transaction "delivers" on completion.
 // start_ns for window i is always i * history_window_ns (derive it from the
 // index, not stored here -- an untouched/empty window still has a well-
 // defined start, and deriving from the index keeps that correct for free).
@@ -202,6 +217,15 @@ struct WindowStats {
     // 2 channels at 25% each versus one at 100% and one idle, and dram_bytes
     // above (summed across channels) can't tell those apart.
     std::vector<uint64_t> dram_bytes_per_channel;
+
+    // [F] Issue-time ("offered") counterpart to the completion-time
+    // ("delivered") fields above -- see the class comment for why both
+    // exist. Bucketed by issue_cycle, same as every field here was before
+    // this fix; a deep outstanding queue front-loads this series the same
+    // way it used to front-load the whole struct, which is exactly the
+    // failure mode delivered bytes no longer have.
+    uint64_t offered_bytes = 0;
+    uint64_t offered_txn_count = 0;
 };
 
 // One independent dispatch stream per (core_id, segment, axi_id): AXI
@@ -266,8 +290,17 @@ struct IdCursor {
         uint64_t max_complete = 0;
         uint32_t hits = 0, conflicts = 0, empties = 0;
         RowStatus dominant_row_status = RowStatus::Empty;
-        bool has_window = false;
-        size_t window_index = 0;
+        // [F] Windowed-history accumulators for this one transaction's
+        // chunks, filled in by route_completed_chunk() as they complete and
+        // folded into windows_[] at finalize_in_progress_txn() time, once
+        // the transaction's own completion window is known -- see
+        // WindowStats's class comment for why this can no longer be
+        // committed straight into windows_[] per chunk the way it used to
+        // be (that used the txn's issue window, computed before any chunk
+        // had actually finished).
+        uint32_t win_bankgroup_reuse = 0;
+        std::set<uint64_t> win_active_banks;
+        std::vector<uint64_t> win_dram_bytes_per_channel;
         // [F] Set once, when issue_cycle is finalized in Engine::run(): the
         // portion of that cycle contributed by this id's outstanding cap
         // being the strictly-binding term over the core's own port and the

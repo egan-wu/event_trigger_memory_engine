@@ -16,13 +16,14 @@
   "history_window_ns": 3000.0,
   "observed_metrics": "see golden.json in this directory -- it is the authoritative snapshot, regenerated with --update-golden whenever model behavior deliberately changes. Numbers were duplicated here once and silently went stale the first time the timing model was fixed.",
   "observed_window_shape": {
-    "zero_activity_windows": 52,
-    "of_total_windows": 94,
-    "note": "txn_count per window alternates almost exactly [150, 0] with an occasional split window ([68, 82]) where a burst straddles a window boundary -- confirms the windowed CSV is bucketing by simulated issue time, not just replaying dispatch order 1:1 into fixed-size chunks."
+    "zero_offered_windows": 55,
+    "zero_delivered_windows": 0,
+    "of_total_windows": 96,
+    "note": "Two different series now, deliberately: offered_txn_count (issue-indexed) alternates almost exactly [150, 0] per window -- each burst's 150 transactions admit back-to-back in ~150 cycles, then nothing issues until the next barrier releases the following burst. The COMPLETION-indexed delivered txn_count instead shows NO idle windows at all (~58-66 per window throughout): this workload's single-bank row-conflict pattern means a burst's 150 transactions drain continuously over thousands of ns, so completions are still arriving well into the barrier-enforced gap before the next burst even issues. Before windowed history was fixed to index delivered fields by completion instead of issue, this workload's delivered series showed the SAME [150,0]-style gaps as offered does now -- indistinguishable from a workload with genuine DRAM idle time, which this one does not have (bandwidth_utilization_pct is identical to strided's the whole run). That was the bug this case exists to expose."
   },
   "sanity_checks": [
     "summary-level hit/conflict/empty rates are identical to strided (0/99.98/0.017), as expected -- this workload reuses the same single-bank-conflict address pattern, just chopped into barrier-separated bursts",
     "avg_latency_ns (3595 ns) is over 50x seq_read's despite an identical avg_dram_bandwidth_gbps to strided (1.34 GB/s) -- this is exactly the intended effect: transactions issue almost instantly within a burst but sit waiting a long time to actually complete, which is what latency (issue-to-complete) measures and bandwidth (bytes/sim_time) does not",
-    "bandwidth_utilization_pct and total sim_time_ns are identical to strided's -- expected, since bursty uses the exact same conflict pattern; only the ISSUE-time distribution differs (this is deliberate: it isolates the windowing/time-axis question from the underlying timing-model numbers, which bursty and strided share)"
+    "bandwidth_utilization_pct and total sim_time_ns are identical to strided's -- expected, since bursty uses the exact same conflict pattern; only the offered (issue-time) window distribution differs from a hypothetical always-busy workload, and the delivered window distribution should NOT differ, since the DRAM itself is equally busy throughout -- see observed_window_shape above"
   ]
 }

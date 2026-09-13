@@ -156,6 +156,12 @@ void write_report_json(const Engine& engine, const std::string& out_path) {
             wv.set("bankgroup_reuse_count", static_cast<int64_t>(w.bankgroup_reuse_count));
             double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
             wv.set("avg_bandwidth_gbps", bw);
+            // [F] Issue-indexed counterpart to the (completion-indexed)
+            // fields above -- see WindowStats's class comment.
+            wv.set("offered_bytes", static_cast<int64_t>(w.offered_bytes));
+            wv.set("offered_txn_count", static_cast<int64_t>(w.offered_txn_count));
+            double obw = window_ns > 0.0 ? static_cast<double>(w.offered_bytes) / window_ns : 0.0;
+            wv.set("offered_bandwidth_gbps", obw);
             wv.set("outstanding_high_water", static_cast<int64_t>(w.max_outstanding_count));
             int max_out = std::max(1, engine.config().max_outstanding_per_id);
             wv.set("outstanding_occupancy_pct", static_cast<double>(w.max_outstanding_count) / max_out * 100.0);
@@ -301,7 +307,9 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
     int nchannels = std::max(1, engine.config().channels);
 
     f << "window_index,start_ns,bytes_read,bytes_written,dram_bytes,txn_count,"
-         "hits,conflicts,empties,bankgroup_reuse_count,avg_bandwidth_gbps,outstanding_high_water,outstanding_occupancy_pct,"
+         "hits,conflicts,empties,bankgroup_reuse_count,avg_bandwidth_gbps,"
+         "offered_bytes,offered_txn_count,offered_bandwidth_gbps,"
+         "outstanding_high_water,outstanding_occupancy_pct,"
          "active_bank_count,bank_utilization_pct";
     // Per-channel columns -- lets a viewer distinguish "every channel at 50%"
     // from "one channel maxed, one idle", both invisible in the aggregate above.
@@ -312,12 +320,15 @@ void write_windowed_csv(const Engine& engine, const std::string& out_path) {
         const WindowStats& w = engine.windows()[i];
         double start_ns = static_cast<double>(i) * window_ns;
         double bw = window_ns > 0.0 ? static_cast<double>(w.bytes_read + w.bytes_written) / window_ns : 0.0;
+        double obw = window_ns > 0.0 ? static_cast<double>(w.offered_bytes) / window_ns : 0.0;
         double occ_pct = static_cast<double>(w.max_outstanding_count) / max_out * 100.0;
         uint64_t active_banks = w.active_banks.size();
         double bank_util_pct = static_cast<double>(active_banks) / total_banks * 100.0;
         f << i << ',' << start_ns << ',' << w.bytes_read << ',' << w.bytes_written << ','
           << w.dram_bytes << ',' << w.txn_count << ',' << w.hits << ',' << w.conflicts << ','
-          << w.empties << ',' << w.bankgroup_reuse_count << ',' << bw << ',' << w.max_outstanding_count << ',' << occ_pct << ','
+          << w.empties << ',' << w.bankgroup_reuse_count << ',' << bw << ','
+          << w.offered_bytes << ',' << w.offered_txn_count << ',' << obw << ','
+          << w.max_outstanding_count << ',' << occ_pct << ','
           << active_banks << ',' << bank_util_pct;
         for (int ch = 0; ch < nchannels; ++ch) {
             uint64_t ch_bytes = (static_cast<size_t>(ch) < w.dram_bytes_per_channel.size()) ? w.dram_bytes_per_channel[ch] : 0;
